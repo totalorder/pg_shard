@@ -91,4 +91,7 @@ extern bool ExecuteTaskAndStoreResults(Task *task, TupleDesc tupleDescriptor,
 									   Tuplestorestate *tupleStore);
 
 
+void SetShardInfo(OpExpr *filterExpression);
+OpExpr* GetShardInfo();
+
 #endif /* PG_SHARD_H */

@@ -27,6 +27,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <catalog/pg_type.h>
+#include <nodes/makefuncs.h>
+#include <optimizer/clauses.h>
+#include <prune_shard_list.h>
+#include <utils/datum.h>
 
 #include "access/hash.h"
 #include "access/nbtree.h"
@@ -44,6 +49,7 @@
 #include "utils/errcodes.h"
 #include "utils/lsyscache.h"
 #include "utils/palloc.h"
+#include "pg_shard.h"
 
 
 /* local function forward declarations */
@@ -59,7 +65,56 @@ static Oid SupportFunctionForColumn(Var *partitionColumn, Oid accessMethodId,
 /* declarations for dynamic loading */
 PG_FUNCTION_INFO_V1(master_create_distributed_table);
 PG_FUNCTION_INFO_V1(master_create_worker_shards);
+PG_FUNCTION_INFO_V1(shard);
 
+
+Datum shard(PG_FUNCTION_ARGS)
+{
+	text *tableNameText = PG_GETARG_TEXT_P(0);
+	Datum datum = PG_GETARG_DATUM(1);
+
+	Datum key;
+
+	Var *partitionColumn;
+	Const *keyConst;
+	OpExpr *equalityExpr;
+	Node *rightOp;
+	Const *rightConst;
+	int16		typLen;
+	bool		typByVal;
+
+
+
+	Oid distributedTableId = ResolveRelationId(tableNameText);
+
+	/* make sure table is hash partitioned */
+	CheckHashPartitionedTable(distributedTableId);
+
+	partitionColumn = PartitionColumn(distributedTableId);
+
+	get_typlenbyval(partitionColumn->vartype,
+					&typLen, &typByVal);
+
+	key = datumCopy(datum, typByVal, typLen);
+
+	keyConst = makeConst(partitionColumn->vartype, partitionColumn->vartypmod, partitionColumn->varcollid, typLen, key, false, typByVal);
+
+	equalityExpr = MakeOpExpression(partitionColumn, BTEqualStrategyNumber);
+	rightOp = get_rightop((Expr *) equalityExpr);
+	rightConst = (Const *) rightOp;
+
+	ereport(LOG, (errmsg("equalityExpr->rightOp nodeTag: %d", nodeTag(rightOp))));
+
+	Assert(IsA(rightOp, Const));
+
+	rightConst->constvalue = keyConst->constvalue;
+	rightConst->constisnull = keyConst->constisnull;
+	rightConst->constbyval = keyConst->constbyval;
+
+	SetShardInfo(equalityExpr);
+
+	PG_RETURN_VOID();
+}
 
 /*
  * master_create_distributed_table inserts the table and partition column

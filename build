@@ -1,0 +1,1 @@
+sudo make install && sudo /etc/init.d/postgresql restart && psql -c "DROP DATABASE shard;" && psql -c "CREATE DATABASE shard" && psql -d shard -f shard_setup.sql

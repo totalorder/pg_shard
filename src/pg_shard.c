@@ -160,6 +160,13 @@ static ExecutorRun_hook_type PreviousExecutorRunHook = NULL;
 static ExecutorFinish_hook_type PreviousExecutorFinishHook = NULL;
 static ExecutorEnd_hook_type PreviousExecutorEndHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
+void pg_shard_xact_cb(XactEvent event, void *arg);
+
+struct ShardInfo {
+	OpExpr *filterExpression;
+};
+
+static struct ShardInfo shardInfo;
 
 
 /*
@@ -171,6 +178,7 @@ void
 _PG_init(void)
 {
 	PLpgSQL_plugin **plugin_ptr = NULL;
+	shardInfo.filterExpression = NULL;
 
 	PreviousPlannerHook = planner_hook;
 	planner_hook = PgShardPlanner;
@@ -210,8 +218,34 @@ _PG_init(void)
 	/* install error transformation handler for PL/pgSQL invocations */
 	plugin_ptr = (PLpgSQL_plugin **) find_rendezvous_variable("PLpgSQL_plugin");
 	*plugin_ptr = &PluginFuncs;
+
+	RegisterXactCallback(&pg_shard_xact_cb, NULL);
 }
 
+
+void SetShardInfo(OpExpr *filterExpression) {
+	if (shardInfo.filterExpression != NULL) {
+		ereport(ERROR, (errmsg("Shard info already set in this transaction!")));
+	} else {
+		shardInfo.filterExpression = filterExpression;
+	}
+}
+
+//OpExpr *GetShardInfo() {
+//	return shardInfo.filterExpression;
+//}
+
+
+void pg_shard_xact_cb(XactEvent event, void *arg)
+{
+	if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT)
+	{
+		if (shardInfo.filterExpression != NULL) {
+			pfree(shardInfo.filterExpression);
+			shardInfo.filterExpression = NULL;
+		}
+	}
+}
 
 /*
  * SetupPLErrorTransformation is intended to run before entering PL/pgSQL
@@ -741,7 +775,16 @@ DistributedQueryShardList(Query *query)
 								"and try again.")));
 	}
 
-	restrictClauseList = QueryRestrictList(query);
+	if (shardInfo.filterExpression != NULL) {
+		ereport(LOG, (errmsg("Lets do it!")));
+		ereport(LOG, (errmsg("filterExpression: %d", shardInfo.filterExpression->opresulttype)));
+		ereport(LOG, (errmsg("equalityExpr->rightOp nodeTag: %d", nodeTag(shardInfo.filterExpression))));
+//		ereport(LOG, (errmsg("filterExpression->xpr nodeTag: %d", nodeTag(shardInfo.filterExpression->xpr))));
+
+		restrictClauseList = list_make1(shardInfo.filterExpression);
+	} else {
+		restrictClauseList = QueryRestrictList(query);
+	}
 	prunedShardList = PruneShardList(distributedTableId, restrictClauseList,
 									 shardIntervalList);
 
@@ -1236,7 +1279,11 @@ PgShardExecutorStart(QueryDesc *queryDesc, int eflags)
 			EState *executorState = NULL;
 
 			/* disallow transactions and triggers during distributed commands */
-			PreventTransactionChain(topLevel, "distributed commands");
+
+			if (IsInTransactionChain(topLevel) && shardInfo.filterExpression == NULL) {
+				PreventTransactionChain(topLevel, "distributed commands");
+			}
+
 			eflags |= EXEC_FLAG_SKIP_TRIGGERS;
 
 			/* build empty executor state to obtain per-query memory context */
@@ -2150,6 +2197,38 @@ PgShardProcessUtility(Node *parsetree, const char *queryString,
 	{
 		DropStmt *dropStatement = (DropStmt *) parsetree;
 		ErrorOnDropIfDistributedTablesExist(dropStatement);
+//	} else if (statementType == T_VariableSetStmt) {
+//		VariableSetStmt *setStmt = (VariableSetStmt *)parsetree;
+//
+//		ereport(LOG, (errmsg("VariableSetStmt: %s", setStmt->name)));
+//
+//		if (strcmp(setStmt->name, "pg_shard.key") == 0) {
+//			if (!setStmt->is_local) {
+//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//						errmsg("pg_shard.key must be set with SET LOCAL")));
+//			} else if (GetConfigOption("pg_shard.table", true, false) == NULL) {
+//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//						errmsg("pg_shard.table must be set before pg_shard.key!")));
+//			} else if (!IsInTransactionChain(true)) {
+//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//						errmsg("pg_shard.key must only be set in a transaction!")));
+//			} else if (GetConfigOption("pg_shard.key", true, false) != NULL) {
+//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//						errmsg("pg_shard.key is already set in transaction!")));
+//			} else {
+//
+//			}
+//		} else if (strcmp(setStmt->name, "pg_shard.value") == 0) {
+//			if (!setStmt->is_local) {
+//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//						errmsg("pg_shard.table must be set with SET LOCAL")));
+//			} else if (!IsInTransactionChain(true)) {
+//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//					errmsg("pg_shard.table must only be set in a transaction!")));
+//			} else if (GetConfigOption("pg_shard.table", true, false) != NULL) {
+//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+//						errmsg("pg_shard.table is already set in transaction!")));
+//			}
 	}
 
 	if (PreviousProcessUtilityHook != NULL)

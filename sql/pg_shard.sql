@@ -187,6 +187,12 @@ END;
 $$;
 
 -- define the table distribution functions
+CREATE FUNCTION shard(table_name text, partition_key anyelement)
+RETURNS void
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT;
+
+-- define the table distribution functions
 CREATE FUNCTION master_create_distributed_table(table_name text, partition_column text,
 												partition_method "char" DEFAULT 'h')
 RETURNS void
