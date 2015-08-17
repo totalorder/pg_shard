@@ -27,6 +27,8 @@
 
 #include <stddef.h>
 #include <string.h>
+#include <inttypes.h>
+#include <utils/datum.h>
 
 #include "access/heapam.h"
 #include "access/htup_details.h"
@@ -144,6 +146,8 @@ static void SetupPLErrorTransformation(PLpgSQL_execstate *estate, PLpgSQL_functi
 static void TeardownPLErrorTransformation(PLpgSQL_execstate *estate,
 										  PLpgSQL_function *func);
 static void PgShardErrorTransform(void *arg);
+
+void ExecuteDistributedStatementOnShards(List *shardList, char *statement);
 static PLpgSQL_plugin PluginFuncs = {
 	.func_beg = SetupPLErrorTransformation,
 	.func_end = TeardownPLErrorTransformation
@@ -162,10 +166,6 @@ static ExecutorEnd_hook_type PreviousExecutorEndHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 void pg_shard_xact_cb(XactEvent event, void *arg);
 
-struct ShardInfo {
-	OpExpr *filterExpression;
-};
-
 static struct ShardInfo shardInfo;
 
 
@@ -178,7 +178,7 @@ void
 _PG_init(void)
 {
 	PLpgSQL_plugin **plugin_ptr = NULL;
-	shardInfo.filterExpression = NULL;
+	shardInfo.shardList = NULL;
 
 	PreviousPlannerHook = planner_hook;
 	planner_hook = PgShardPlanner;
@@ -223,28 +223,204 @@ _PG_init(void)
 }
 
 
-void SetShardInfo(OpExpr *filterExpression) {
-	if (shardInfo.filterExpression != NULL) {
+void SetShardInfo(List *shardList) {
+	if (shardInfo.shardList != NULL) {
 		ereport(ERROR, (errmsg("Shard info already set in this transaction!")));
 	} else {
-		shardInfo.filterExpression = filterExpression;
+		shardInfo.shardList = shardList;
 	}
 }
 
-//OpExpr *GetShardInfo() {
-//	return shardInfo.filterExpression;
-//}
-
-
 void pg_shard_xact_cb(XactEvent event, void *arg)
 {
-	if (event == XACT_EVENT_COMMIT || event == XACT_EVENT_ABORT)
-	{
-		if (shardInfo.filterExpression != NULL) {
-			pfree(shardInfo.filterExpression);
-			shardInfo.filterExpression = NULL;
+	if (shardInfo.shardList != NULL) {
+		ereport(LOG, (errmsg("Ending sharded transaction with event %d", event)));
+		if (event == XACT_EVENT_COMMIT) {
+			ExecuteDistributedStatementOnShards(shardInfo.shardList, "COMMIT;");
+			pfree(shardInfo.shardList);
+			shardInfo.shardList = NULL;
+		} else if (event == XACT_EVENT_ABORT) {
+			ExecuteDistributedStatementOnShards(shardInfo.shardList, "ROLLBACK;");
+			pfree(shardInfo.shardList);
+			shardInfo.shardList = NULL;
 		}
+
+
 	}
+}
+
+/*
+ * CheckHashPartitionedTable looks up the partition information for the given
+ * tableId and checks if the table is hash partitioned. If not, the function
+ * throws an error.
+ */
+void CheckHashPartitionedTable(Oid distributedTableId)
+{
+	char partitionType = PartitionType(distributedTableId);
+	if (partitionType != HASH_PARTITION_TYPE)
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("unsupported table partition type: %c", partitionType)));
+	}
+}
+
+
+struct ShardInfo *GetShardInfo() {
+	return &shardInfo;
+}
+
+OpExpr *GetFilterFromShardingInfo(text *tableNameText, Datum datum, Oid *tableIdPtr) {
+	Const *keyConst;
+	Var *partitionColumn;
+	OpExpr *equalityExpr;
+	Node *rightOp;
+	Const *rightConst;
+	int16		typLen;
+	bool		typByVal;
+	Datum key;
+
+	Oid distributedTableId = ResolveRelationId(tableNameText);
+	*tableIdPtr = distributedTableId;
+
+	partitionColumn = PartitionColumn(distributedTableId);
+
+	get_typlenbyval(partitionColumn->vartype,
+					&typLen, &typByVal);
+	key = datumCopy(datum, typByVal, typLen);
+
+	CheckHashPartitionedTable(distributedTableId);
+
+	keyConst = makeConst(partitionColumn->vartype, partitionColumn->vartypmod, partitionColumn->varcollid, typLen, key, false, typByVal);
+
+	equalityExpr = MakeOpExpression(partitionColumn, BTEqualStrategyNumber);
+	rightOp = get_rightop((Expr *) equalityExpr);
+	rightConst = (Const *) rightOp;
+
+	rightConst->constvalue = keyConst->constvalue;
+	rightConst->constisnull = keyConst->constisnull;
+	rightConst->constbyval = keyConst->constbyval;
+
+	return equalityExpr;
+}
+
+void ExecuteDistributedStatementOnShards(List *shardList, char *statement) {
+	ListCell *shardIntervalCell = NULL;
+	List *taskList = NIL;
+	Task *firstTask;
+	ListCell *taskPlacementCell = NULL;
+	List *failedPlacementList = NIL;
+	ListCell *failedPlacementCell = NULL;
+
+	ereport(LOG, (errmsg("Found %d shards", list_length(shardList))));
+
+	foreach(shardIntervalCell, shardList)
+	{
+		Task *task = NULL;
+		ShardInterval *shardInterval = (ShardInterval *) lfirst(shardIntervalCell);
+		int64 shardId = shardInterval->id;
+		List *finalizedPlacementList = NIL;
+		StringInfo beginQueryString = makeStringInfo();
+		appendStringInfoString(beginQueryString, statement);
+
+		/* grab shared metadata lock to stop concurrent placement additions */
+		LockShardDistributionMetadata(shardId, ShareLock);
+
+		/* now safe to populate placement list */
+		finalizedPlacementList = LoadFinalizedShardPlacementList(shardId);
+
+		task = (Task *) palloc0(sizeof(Task));
+		task->queryString = beginQueryString;
+		task->taskPlacementList = finalizedPlacementList;
+		task->shardId = shardId;
+		ereport(LOG, (errmsg("Placements for shard %ld : %d", shardId, list_length(finalizedPlacementList))));
+
+		taskList = lappend(taskList, task);
+	}
+
+	if (list_length(taskList) != 1)
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot modify multiple shards during a single query")));
+	}
+
+	firstTask = (Task *) linitial(taskList);
+
+	foreach(taskPlacementCell, firstTask->taskPlacementList)
+	{
+		ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
+		char *nodeName = taskPlacement->nodeName;
+		int32 nodePort = taskPlacement->nodePort;
+
+		PGconn *connection = NULL;
+		PGresult *result = NULL;
+//		char *currentAffectedTupleString = NULL;
+//		int32 currentAffectedTupleCount = -1;
+
+		Assert(taskPlacement->shardState == STATE_FINALIZED);
+
+		connection = GetConnection(nodeName, nodePort);
+		if (connection == NULL)
+		{
+			failedPlacementList = lappend(failedPlacementList, taskPlacement);
+			ereport(LOG, (errmsg("Failed to get connection for %s:%d", nodeName, nodePort)));
+			continue;
+		}
+
+		ereport(LOG, (errmsg("Executing %s on %s:%d", firstTask->queryString->data, nodeName, nodePort)));
+		result = PQexec(connection, firstTask->queryString->data);
+		if (PQresultStatus(result) != PGRES_COMMAND_OK)
+		{
+			ReportRemoteError(connection, result);
+			PQclear(result);
+
+			failedPlacementList = lappend(failedPlacementList, taskPlacement);
+			ereport(LOG, (errmsg("Failed execute on %s:%d", nodeName, nodePort)));
+			continue;
+		}
+
+//		currentAffectedTupleString = PQcmdTuples(result);
+//		currentAffectedTupleCount = pg_atoi(currentAffectedTupleString, sizeof(int32), 0);
+//
+//		if ((affectedTupleCount == -1) ||
+//			(affectedTupleCount == currentAffectedTupleCount))
+//		{
+//			affectedTupleCount = currentAffectedTupleCount;
+//		}
+//		else
+//		{
+//			ereport(WARNING, (errmsg("modified %d tuples, but expected to modify %d",
+//									 currentAffectedTupleCount, affectedTupleCount),
+//					errdetail("modified placement on %s:%d",
+//							  nodeName, nodePort)));
+//		}
+
+		PQclear(result);
+	}
+
+	/* if all placements failed, error out */
+	if (list_length(failedPlacementList) == list_length(firstTask->taskPlacementList))
+	{
+		ereport(ERROR, (errmsg("could not modify any active placements")));
+	}
+
+	/* otherwise, mark failed placements as inactive: they're stale */
+	foreach(failedPlacementCell, failedPlacementList)
+	{
+		ShardPlacement *failedPlacement = (ShardPlacement *) lfirst(failedPlacementCell);
+
+		UpdateShardPlacementRowState(failedPlacement->id, STATE_INACTIVE);
+	}
+}
+
+List *ExecuteDistributedStatement(Oid tableId, OpExpr *filterExpression, char *statement) {
+	List *prunedShardList = PruneShardList(
+			tableId,
+			list_make1(filterExpression),
+			LookupShardIntervalList(tableId));
+
+	ExecuteDistributedStatementOnShards(prunedShardList, statement);
+
+	return prunedShardList;
 }
 
 /*
@@ -775,13 +951,8 @@ DistributedQueryShardList(Query *query)
 								"and try again.")));
 	}
 
-	if (shardInfo.filterExpression != NULL) {
-		ereport(LOG, (errmsg("Lets do it!")));
-		ereport(LOG, (errmsg("filterExpression: %d", shardInfo.filterExpression->opresulttype)));
-		ereport(LOG, (errmsg("equalityExpr->rightOp nodeTag: %d", nodeTag(shardInfo.filterExpression))));
-//		ereport(LOG, (errmsg("filterExpression->xpr nodeTag: %d", nodeTag(shardInfo.filterExpression->xpr))));
-
-		restrictClauseList = list_make1(shardInfo.filterExpression);
+	if (shardInfo.shardList != NULL) {
+		return shardInfo.shardList;
 	} else {
 		restrictClauseList = QueryRestrictList(query);
 	}
@@ -1280,7 +1451,7 @@ PgShardExecutorStart(QueryDesc *queryDesc, int eflags)
 
 			/* disallow transactions and triggers during distributed commands */
 
-			if (IsInTransactionChain(topLevel) && shardInfo.filterExpression == NULL) {
+			if (IsInTransactionChain(topLevel) && shardInfo.shardList == NULL) {
 				PreventTransactionChain(topLevel, "distributed commands");
 			}
 
@@ -1970,6 +2141,9 @@ ExecuteSingleShardSelect(DistributedPlan *distributedPlan, EState *executorState
 	Assert(list_length(taskList) == 1);
 
 	task = (Task *) linitial(taskList);
+
+	ereport(INFO, (errmsg("Single execute on shard: %" PRId64, (long)task->shardId)));
+
 	tupleStore = tuplestore_begin_heap(false, false, work_mem);
 
 	resultsOK = ExecuteTaskAndStoreResults(task, tupleDescriptor, tupleStore);

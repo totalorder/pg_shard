@@ -91,7 +91,13 @@ extern bool ExecuteTaskAndStoreResults(Task *task, TupleDesc tupleDescriptor,
 									   Tuplestorestate *tupleStore);
 
 
-void SetShardInfo(OpExpr *filterExpression);
-OpExpr* GetShardInfo();
+void SetShardInfo(List *shardInfo);
+OpExpr *GetFilterFromShardingInfo(text *tableNameText, Datum datum, Oid *tableIdPtr);
+List *ExecuteDistributedStatement(Oid tableId, OpExpr *filterExpression, char *statement);
+void CheckHashPartitionedTable(Oid distributedTableId);
+struct ShardInfo *GetShardInfo(void);
+struct ShardInfo {
+	List *shardList;
+};
 
 #endif /* PG_SHARD_H */

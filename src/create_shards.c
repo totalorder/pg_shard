@@ -32,6 +32,9 @@
 #include <optimizer/clauses.h>
 #include <prune_shard_list.h>
 #include <utils/datum.h>
+#include <utils/memutils.h>
+#include <inttypes.h>
+#include <access/xact.h>
 
 #include "access/hash.h"
 #include "access/nbtree.h"
@@ -53,7 +56,7 @@
 
 
 /* local function forward declarations */
-static void CheckHashPartitionedTable(Oid distributedTableId);
+
 static List * ParseWorkerNodeFile(char *workerNodeFilename);
 static int CompareWorkerNodes(const void *leftElement, const void *rightElement);
 static bool ExecuteRemoteCommand(PGconn *connection, const char *sqlCommand);
@@ -70,48 +73,31 @@ PG_FUNCTION_INFO_V1(shard);
 
 Datum shard(PG_FUNCTION_ARGS)
 {
+	MemoryContext oldContext = MemoryContextSwitchTo(CurTransactionContext);
+
 	text *tableNameText = PG_GETARG_TEXT_P(0);
-	Datum datum = PG_GETARG_DATUM(1);
+	Datum key = PG_GETARG_DATUM(1);
+	Oid tableId;
+	OpExpr *filterExpression;
+	List *shardList;
 
-	Datum key;
+	if (!IsInTransactionChain(true)) {
+		ereport(ERROR, (errmsg("shard() can only be run in a transaction!")));
+	}
 
-	Var *partitionColumn;
-	Const *keyConst;
-	OpExpr *equalityExpr;
-	Node *rightOp;
-	Const *rightConst;
-	int16		typLen;
-	bool		typByVal;
+	if (GetShardInfo()->shardList != NULL) {
+		ereport(ERROR, (errmsg("shard() already set in this transaction!")));
+	}
 
+	ereport(LOG, (errmsg("Starting sharded transaction on table %s", text_to_cstring(tableNameText))));
 
+	GetFilterFromShardingInfo(tableNameText, key, &tableId);
+	filterExpression = GetFilterFromShardingInfo(tableNameText, key, &tableId);
 
-	Oid distributedTableId = ResolveRelationId(tableNameText);
+	shardList = ExecuteDistributedStatement(tableId, filterExpression, "BEGIN;");
 
-	/* make sure table is hash partitioned */
-	CheckHashPartitionedTable(distributedTableId);
-
-	partitionColumn = PartitionColumn(distributedTableId);
-
-	get_typlenbyval(partitionColumn->vartype,
-					&typLen, &typByVal);
-
-	key = datumCopy(datum, typByVal, typLen);
-
-	keyConst = makeConst(partitionColumn->vartype, partitionColumn->vartypmod, partitionColumn->varcollid, typLen, key, false, typByVal);
-
-	equalityExpr = MakeOpExpression(partitionColumn, BTEqualStrategyNumber);
-	rightOp = get_rightop((Expr *) equalityExpr);
-	rightConst = (Const *) rightOp;
-
-	ereport(LOG, (errmsg("equalityExpr->rightOp nodeTag: %d", nodeTag(rightOp))));
-
-	Assert(IsA(rightOp, Const));
-
-	rightConst->constvalue = keyConst->constvalue;
-	rightConst->constisnull = keyConst->constisnull;
-	rightConst->constbyval = keyConst->constbyval;
-
-	SetShardInfo(equalityExpr);
+	SetShardInfo(shardList);
+	MemoryContextSwitchTo(oldContext);
 
 	PG_RETURN_VOID();
 }
@@ -401,24 +387,6 @@ ResolveRelationId(text *relationName)
 
 	return relationId;
 }
-
-
-/*
- * CheckHashPartitionedTable looks up the partition information for the given
- * tableId and checks if the table is hash partitioned. If not, the function
- * throws an error.
- */
-static void
-CheckHashPartitionedTable(Oid distributedTableId)
-{
-	char partitionType = PartitionType(distributedTableId);
-	if (partitionType != HASH_PARTITION_TYPE)
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("unsupported table partition type: %c", partitionType)));
-	}
-}
-
 
 /*
  * ParseWorkerNodeFile opens and parses the node name and node port from the
