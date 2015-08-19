@@ -91,7 +91,6 @@ Datum shard(PG_FUNCTION_ARGS)
 
 	ereport(LOG, (errmsg("Starting sharded transaction on table %s", text_to_cstring(tableNameText))));
 
-	GetFilterFromShardingInfo(tableNameText, key, &tableId);
 	filterExpression = GetFilterFromShardingInfo(tableNameText, key, &tableId);
 
 	shardList = ExecuteDistributedStatement(tableId, filterExpression, "BEGIN;");

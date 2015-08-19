@@ -146,6 +146,7 @@ static void SetupPLErrorTransformation(PLpgSQL_execstate *estate, PLpgSQL_functi
 static void TeardownPLErrorTransformation(PLpgSQL_execstate *estate,
 										  PLpgSQL_function *func);
 static void PgShardErrorTransform(void *arg);
+static void ErrorShardMismatch(void);
 
 void ExecuteDistributedStatementOnShards(List *shardList, char *statement);
 static PLpgSQL_plugin PluginFuncs = {
@@ -937,6 +938,9 @@ DistributedQueryShardList(Query *query)
 	Oid distributedTableId = ExtractFirstDistributedTableId(query);
 	List *shardIntervalList = NIL;
 
+	ListCell *prunedShardIntervalCell = NULL;
+	ListCell *lockedShardIntervalCell = NULL;
+
 	/* error out if no shards exist for the table */
 	shardIntervalList = LookupShardIntervalList(distributedTableId);
 	if (shardIntervalList == NIL)
@@ -951,17 +955,41 @@ DistributedQueryShardList(Query *query)
 								"and try again.")));
 	}
 
-	if (shardInfo.shardList != NULL) {
-		return shardInfo.shardList;
-	} else {
-		restrictClauseList = QueryRestrictList(query);
-	}
+	restrictClauseList = QueryRestrictList(query);
 	prunedShardList = PruneShardList(distributedTableId, restrictClauseList,
 									 shardIntervalList);
+
+	if (shardInfo.shardList != NULL) {
+		// Error out if the shards required for this query does not match the shards
+		// the transaction is locked to
+		if (shardInfo.shardList->length != prunedShardList->length) {
+			ErrorShardMismatch();
+		} else {
+			prunedShardIntervalCell = list_head(prunedShardList);
+			foreach(lockedShardIntervalCell, shardInfo.shardList) {
+				ShardInterval *lockedShardInterval = (ShardInterval *)lfirst(lockedShardIntervalCell);
+				ShardInterval *prunedShardInterval = (ShardInterval *)lfirst(prunedShardIntervalCell);
+
+				if (lockedShardInterval->id != prunedShardInterval->id) {
+					ErrorShardMismatch();
+					break;
+				}
+
+				prunedShardIntervalCell = lnext(prunedShardIntervalCell);
+			}
+		}
+
+		return shardInfo.shardList;
+	}
 
 	return prunedShardList;
 }
 
+static void ErrorShardMismatch() {
+	ereport(ERROR, (errmsg("Statement touches shards outside the transaction!"),
+			errdetail("The statement touches shards that are not allowed in the scope of the transaction"),
+			errhint("Make sure all statements in the transaction touches exactly the same shards")));
+}
 
 /* Returns true if the query is a select query that reads data from multiple shards. */
 static bool
