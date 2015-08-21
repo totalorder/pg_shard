@@ -2170,7 +2170,7 @@ ExecuteSingleShardSelect(DistributedPlan *distributedPlan, EState *executorState
 
 	task = (Task *) linitial(taskList);
 
-	ereport(INFO, (errmsg("Single execute on shard: %" PRId64, (long)task->shardId)));
+//	ereport(INFO, (errmsg("Single execute on shard: %" PRId64, (long)task->shardId)));
 
 	tupleStore = tuplestore_begin_heap(false, false, work_mem);
 
