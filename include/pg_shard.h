@@ -28,6 +28,8 @@
 /* extension name used to determine if extension has been created */
 #define PG_SHARD_EXTENSION_NAME "pg_shard"
 
+#define PG_SHARD_METADATA_NAMESPACE "pgs_distribution_metadata"
+
 
 /*
  * DistributedNodeTag identifies nodes used in the planning and execution of
@@ -94,6 +96,7 @@ extern bool ExecuteTaskAndStoreResults(Task *task, TupleDesc tupleDescriptor,
 void SetShardInfo(List *shardInfo);
 OpExpr *GetFilterFromShardingInfo(text *tableNameText, Datum datum, Oid *tableIdPtr);
 List *ExecuteDistributedStatement(Oid tableId, OpExpr *filterExpression, char *statement);
+void ExecuteDistributedStatementOnShards(List *shardList, char *statement);
 void CheckHashPartitionedTable(Oid distributedTableId);
 struct ShardInfo *GetShardInfo(void);
 struct ShardInfo {

@@ -19,6 +19,7 @@
 
 #include <stddef.h>
 #include <string.h>
+#include <pg_shard.h>
 
 #include "access/attnum.h"
 #include "access/htup.h"
@@ -372,6 +373,22 @@ PartitionType(Oid distributedTableId)
 	return partitionType;
 }
 
+bool IsInSystemNamespace(Oid tableId) {
+	Oid metadataNamespaceOid = get_namespace_oid(PG_SHARD_METADATA_NAMESPACE, false);
+	Oid tableNamespaceOid = InvalidOid;
+
+	/* short-circuit if the input is invalid */
+	if (tableId == InvalidOid) {
+		return false;
+	}
+
+	tableNamespaceOid = get_rel_namespace(tableId);
+	if (IsSystemNamespace(tableNamespaceOid) ||
+			tableNamespaceOid == metadataNamespaceOid) {// ||
+		return true;
+	}
+	return false;
+}
 
 /*
  * IsDistributedTable returns whether the specified table is distributed. It
@@ -652,17 +669,13 @@ InsertPartitionRow(Oid distributedTableId, char partitionType, text *partitionKe
  * and returns the primary key of that new row. Note that we allow the user to
  * pass in null min/max values.
  */
-int64
-CreateShardRow(Oid distributedTableId, char shardStorage, text *shardMinValue,
-			   text *shardMaxValue)
-{
+int64 CreateShardRow(int32 clusterId, int32 shardMinValue, int32 shardMaxValue) {
 	int64 newShardId = -1;
-	Oid argTypes[] = { OIDOID, CHAROID, TEXTOID, TEXTOID };
+	Oid argTypes[] = { OIDOID, INT4OID, INT4OID };
 	Datum argValues[] = {
-		ObjectIdGetDatum(distributedTableId),
-		CharGetDatum(shardStorage),
-		PointerGetDatum(shardMinValue),
-		PointerGetDatum(shardMaxValue)
+			Int32GetDatum(clusterId),
+			Int32GetDatum(shardMinValue),
+			Int32GetDatum(shardMaxValue)
 	};
 	const int argCount = sizeof(argValues) / sizeof(argValues[0]);
 	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
@@ -672,8 +685,8 @@ CreateShardRow(Oid distributedTableId, char shardStorage, text *shardMinValue,
 	SPI_connect();
 
 	spiStatus = SPI_execute_with_args("INSERT INTO pgs_distribution_metadata.shard "
-									  "(relation_id, storage, min_value, max_value) "
-									  "VALUES ($1, $2, $3, $4) RETURNING id", argCount,
+											  "(cluster_id, min_value, max_value) "
+											  "VALUES ($1, $2, $3) RETURNING id", argCount,
 									  argTypes, argValues, NULL, false, 1);
 	Assert(spiStatus == SPI_OK_INSERT_RETURNING);
 

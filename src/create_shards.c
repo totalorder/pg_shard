@@ -35,6 +35,8 @@
 #include <utils/memutils.h>
 #include <inttypes.h>
 #include <access/xact.h>
+#include <executor/spi.h>
+#include <utils/typcache.h>
 
 #include "access/hash.h"
 #include "access/nbtree.h"
@@ -60,7 +62,6 @@
 static List * ParseWorkerNodeFile(char *workerNodeFilename);
 static int CompareWorkerNodes(const void *leftElement, const void *rightElement);
 static bool ExecuteRemoteCommand(PGconn *connection, const char *sqlCommand);
-static text * IntegerToText(int32 value);
 static Oid SupportFunctionForColumn(Var *partitionColumn, Oid accessMethodId,
 									int16 supportFunctionNumber);
 
@@ -69,18 +70,44 @@ static Oid SupportFunctionForColumn(Var *partitionColumn, Oid accessMethodId,
 PG_FUNCTION_INFO_V1(master_create_distributed_table);
 PG_FUNCTION_INFO_V1(master_create_worker_shards);
 PG_FUNCTION_INFO_V1(shard);
+PG_FUNCTION_INFO_V1(shardall);
+PG_FUNCTION_INFO_V1(master_create_cluster);
 
 
 Datum shard(PG_FUNCTION_ARGS)
 {
 	MemoryContext oldContext = MemoryContextSwitchTo(CurTransactionContext);
 
-	text *tableNameText = PG_GETARG_TEXT_P(0);
+	text *clusterNameText = PG_GETARG_TEXT_P(0);
 	Datum key = PG_GETARG_DATUM(1);
-	Oid tableId;
-	OpExpr *filterExpression;
-	List *shardList;
+	Oid keyType;
+	int64 shardId;
+	Datum clusterIdDatum;
+	ShardInterval *shardInterval;
 
+	List *shardIntervalList = NIL;
+	bool isNull = false;
+
+	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
+
+	Oid fetchClusterArgTypes[] = { TEXTOID };
+	Datum fetchClusterArgValues[] = {
+			PG_GETARG_DATUM(0), // cluster name
+	};
+	const int fetchClusterArgCount = sizeof(fetchClusterArgValues) / sizeof(fetchClusterArgValues[0]);
+
+	Oid fetchShardsArgTypes[] = { INT4OID, INT4OID };
+	Datum fetchShardsArgValues[2];
+	const int fetchShardsArgCount = 2;
+
+	Datum hashedValue = 0;
+	int hashedValueInt;
+	Datum shardIdDatum;
+	FmgrInfo *hashFunction = NULL;
+	TypeCacheEntry *typeEntry = NULL;
+
+
+	// Guards
 	if (!IsInTransactionChain(true)) {
 		ereport(ERROR, (errmsg("shard() can only be run in a transaction!")));
 	}
@@ -89,14 +116,277 @@ Datum shard(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("shard() already set in this transaction!")));
 	}
 
-	ereport(LOG, (errmsg("Starting sharded transaction on table %s", text_to_cstring(tableNameText))));
+	ereport(LOG, (errmsg("Starting sharded transaction on cluster '%s'", text_to_cstring(clusterNameText))));
 
-	filterExpression = GetFilterFromShardingInfo(tableNameText, key, &tableId);
+	// Fetch cluster id and key type
+	SPI_connect();
 
-	shardList = ExecuteDistributedStatement(tableId, filterExpression, "BEGIN;");
+	spiStatus = SPI_execute_with_args("SELECT id, key_type FROM pgs_distribution_metadata.cluster "
+											  "WHERE name = $1", fetchClusterArgCount, fetchClusterArgTypes,
+									  fetchClusterArgValues, NULL, false, 0);
 
-	SetShardInfo(shardList);
+	Assert(spiStatus == SPI_OK_SELECT);
+
+	clusterIdDatum = (SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+								   1, &isNull));
+
+
+	keyType = DatumGetObjectId(SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+											2, &isNull));
+	SPI_finish();
+
+
+	// Calculate the hash of the sharding key
+	typeEntry = lookup_type_cache(keyType, TYPECACHE_HASH_PROC_FINFO);
+	hashFunction = &(typeEntry->hash_proc_finfo);
+	if (!OidIsValid(hashFunction->fn_oid))
+	{
+		ereport(ERROR, (errcode(ERRCODE_UNDEFINED_FUNCTION),
+				errmsg("could not identify a hash function for type %s",
+					   format_type_be(keyType)),
+				errdatatype(keyType)));
+	}
+
+	hashedValue = FunctionCall1(hashFunction, key);
+	hashedValueInt = DatumGetInt32(hashedValue);
+
+	ereport(LOG, (errmsg("Using hashed key '%d'", hashedValueInt)));
+
+	fetchShardsArgValues[0] = clusterIdDatum;
+	fetchShardsArgValues[1] = hashedValue;
+
+	// Fetch the shards
+	SPI_connect();
+	spiStatus = SPI_execute_with_args("SELECT id FROM pgs_distribution_metadata.shard AS cs "
+											    "WHERE cs.cluster_id = $1 AND min_value <= $2 AND max_value >= $2",
+									  fetchShardsArgCount, fetchShardsArgTypes,
+									  fetchShardsArgValues, NULL, false, 0);
+
+	Assert(spiStatus == SPI_OK_SELECT);
+
+	shardIdDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+				  1, &isNull);
+
+
+
+	shardId = DatumGetInt64(shardIdDatum);
+
+	SPI_finish();
+
+	shardInterval = palloc0(sizeof(ShardInterval));
+	shardInterval->id = shardId;
+	shardInterval->valueTypeId = keyType;
+	shardIntervalList = lappend(shardIntervalList, shardInterval);
+
+
+	ExecuteDistributedStatementOnShards(shardIntervalList, "BEGIN;");
+
+	SetShardInfo(shardIntervalList);
 	MemoryContextSwitchTo(oldContext);
+
+	PG_RETURN_VOID();
+}
+
+Datum shardall(PG_FUNCTION_ARGS)
+{
+	MemoryContext spiContext;
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+	text *clusterNameText = PG_GETARG_TEXT_P(0);
+	List *shardIntervalList = NIL;
+	bool isNull = false;
+
+	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
+
+	Oid fetchShardsArgTypes[] = { TEXTOID };
+	Datum fetchShardsArgValues[] = {
+			PG_GETARG_DATUM(0), // cluster name
+	};
+
+	const int fetchShardsArgCount = sizeof(fetchShardsArgValues) / sizeof(fetchShardsArgValues[0]);
+
+
+	// Guards
+	if (!IsInTransactionChain(true)) {
+		ereport(ERROR, (errmsg("shard() can only be run in a transaction!")));
+	}
+
+	if (GetShardInfo()->shardList != NULL) {
+		ereport(ERROR, (errmsg("shard() already set in this transaction!")));
+	}
+
+	ereport(LOG, (errmsg("Starting sharded transaction on cluster '%s'", text_to_cstring(clusterNameText))));
+
+	ereport(LOG, (errmsg("Using hashed key ALL")));
+
+	// Fetch all shards
+	SPI_connect();
+
+	spiStatus = SPI_execute_with_args("SELECT cs.id FROM pgs_distribution_metadata.shard AS cs "
+											 "JOIN pgs_distribution_metadata.cluster AS c ON (c.id = cs.cluster_id AND c.name = $1)",
+									  fetchShardsArgCount, fetchShardsArgTypes,
+									  fetchShardsArgValues, NULL, false, 0);
+
+	Assert(spiStatus == SPI_OK_SELECT);
+
+	// TODO: Figure out how to get around the awkward memory dance
+	spiContext = MemoryContextSwitchTo(TopTransactionContext);
+	for (uint32 rowNumber = 0; rowNumber < SPI_processed; rowNumber++)
+	{
+		ShardInterval *shardInterval;
+		int64 shardId;
+		Datum shardIdDatum = SPI_getbinval(SPI_tuptable->vals[rowNumber], SPI_tuptable->tupdesc,
+									 1, &isNull);
+
+		shardId = DatumGetInt64(shardIdDatum);
+
+		shardInterval = palloc0(sizeof(ShardInterval));
+		shardInterval->id = shardId;
+
+		shardIntervalList = lappend(shardIntervalList, shardInterval);
+	}
+
+	MemoryContextSwitchTo(spiContext);
+
+	SPI_finish();
+
+	ExecuteDistributedStatementOnShards(shardIntervalList, "BEGIN;");
+
+	SetShardInfo(shardIntervalList);
+
+	MemoryContextSwitchTo(oldContext);
+
+	PG_RETURN_VOID();
+}
+
+Datum master_create_cluster(PG_FUNCTION_ARGS) {
+	int32 shardCount = PG_GETARG_INT32(2);
+	int32 replicationFactor = PG_GETARG_INT32(3);
+	int32 shardIndex;
+	int32 workerNodeCount = 0;
+	uint32 hashTokenIncrement = 0;
+	bool isNull = false;
+	Datum clusterIdDatum;
+	int32 clusterId;
+	Oid createClusterArgTypes[] = { TEXTOID, REGTYPEOID };
+	Datum createClusterArgValues[] = {
+		PG_GETARG_DATUM(0), // cluster name
+		PG_GETARG_DATUM(1)  // key type
+	};
+	const int createClusterArgCount = sizeof(createClusterArgValues) / sizeof(createClusterArgValues[0]);
+
+
+	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
+
+	// Create the cluster
+	SPI_connect();
+
+	spiStatus = SPI_execute_with_args("INSERT INTO pgs_distribution_metadata.cluster "
+											  "(name, key_type) "
+											  "VALUES ($1, $2) RETURNING id", createClusterArgCount, createClusterArgTypes,
+									  createClusterArgValues, NULL, false, 0);
+
+	Assert(spiStatus == SPI_OK_INSERT);
+
+	clusterIdDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+								  1, &isNull);
+	clusterId = DatumGetInt32(clusterIdDatum);
+
+	SPI_finish();
+
+
+	/* calculate the split of the hash space */
+	hashTokenIncrement = UINT_MAX / shardCount;
+
+	// Create shards
+	for (shardIndex = 0; shardIndex < shardCount; shardIndex++)
+	{
+		int64 shardId = -1;
+		int32 placementCount = 0;
+		uint32 placementIndex = 0;
+		uint32 roundRobinNodeIndex;
+		uint32 placementAttemptCount = 0;
+		List *workerNodeList = NIL;
+
+
+		int32 shardMinHashToken = INT_MIN + (shardIndex * hashTokenIncrement);
+		int32 shardMaxHashToken = shardMinHashToken + hashTokenIncrement - 1;
+
+		/* if we are at the last shard, make sure the max token value is INT_MAX */
+		if (shardIndex == (shardCount - 1))
+		{
+			shardMaxHashToken = INT_MAX;
+		}
+
+		/* insert the shard metadata row along with its min/max values */
+		shardId = CreateShardRow(clusterId, shardMinHashToken,
+										shardMaxHashToken);
+
+		/* load and sort the worker node list for deterministic placement */
+		workerNodeList = ParseWorkerNodeFile(WORKER_LIST_FILENAME);
+		workerNodeList = SortList(workerNodeList, CompareWorkerNodes);
+
+		/* make sure we don't process cancel signals until all shards are created */
+		HOLD_INTERRUPTS();
+
+		workerNodeCount = list_length(workerNodeList);
+		if (replicationFactor > workerNodeCount)
+		{
+			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					errmsg("replication_factor (%d) exceeds number of worker nodes "
+								   "(%d)", replicationFactor, workerNodeCount),
+					errhint("Add more worker nodes or try again with a lower "
+									"replication factor.")));
+		}
+
+		roundRobinNodeIndex = shardIndex % workerNodeCount;
+
+		/* if we have enough nodes, add an extra placement attempt for backup */
+		placementAttemptCount = (uint32) replicationFactor;
+		if (workerNodeCount > replicationFactor)
+		{
+			placementAttemptCount++;
+		}
+
+
+		/*
+		 * Grabbing the shard metadata lock isn't technically necessary since
+		 * we already hold an exclusive lock on the partition table, but we'll
+		 * acquire it for the sake of completeness. As we're adding new active
+		 * placements, the mode must be exclusive.
+		 */
+		LockShardDistributionMetadata(shardId, ExclusiveLock);
+
+		// Create shard placements
+		for (placementIndex = 0; placementIndex < placementAttemptCount; placementIndex++)
+		{
+			int32 candidateNodeIndex = (roundRobinNodeIndex + placementIndex) % workerNodeCount;
+
+			WorkerNode *candidateNode = (WorkerNode *) list_nth(workerNodeList,
+																candidateNodeIndex);
+			char *nodeName = candidateNode->nodeName;
+			uint32 nodePort = candidateNode->nodePort;
+
+			CreateShardPlacementRow(shardId, STATE_FINALIZED, nodeName, nodePort);
+			placementCount++;
+
+			if (placementCount >= replicationFactor)
+			{
+				break;
+			}
+		}
+
+		/* check if we created enough shard replicas */
+		if (placementCount < replicationFactor)
+		{
+			ereport(ERROR, (errmsg("could not satisfy specified replication factor"),
+					errdetail("Created %d shard replicas, less than the "
+									  "requested replication factor of %d.",
+							  placementCount, replicationFactor)));
+		}
+
+		RESUME_INTERRUPTS();
+	}
 
 	PG_RETURN_VOID();
 }
@@ -181,190 +471,6 @@ master_create_distributed_table(PG_FUNCTION_ARGS)
 
 	/* insert row into the partition metadata table */
 	InsertPartitionRow(distributedTableId, partitionMethod, partitionColumnText);
-
-	PG_RETURN_VOID();
-}
-
-
-/*
- * master_create_worker_shards creates empty shards for the given table based
- * on the specified number of initial shards. The function first gets a list of
- * candidate nodes and issues DDL commands on the nodes to create empty shard
- * placements on those nodes. The function then updates metadata on the master
- * node to make this shard (and its placements) visible. Note that the function
- * assumes the table is hash partitioned and calculates the min/max hash token
- * ranges for each shard, giving them an equal split of the hash space.
- */
-Datum
-master_create_worker_shards(PG_FUNCTION_ARGS)
-{
-	text *tableNameText = PG_GETARG_TEXT_P(0);
-	int32 shardCount = PG_GETARG_INT32(1);
-	int32 replicationFactor = PG_GETARG_INT32(2);
-
-	Oid distributedTableId = ResolveRelationId(tableNameText);
-	char relationKind = get_rel_relkind(distributedTableId);
-	char *tableName = text_to_cstring(tableNameText);
-	char shardStorageType = '\0';
-	int32 shardIndex = 0;
-	List *workerNodeList = NIL;
-	List *ddlCommandList = NIL;
-	int32 workerNodeCount = 0;
-	uint32 placementAttemptCount = 0;
-	uint32 hashTokenIncrement = 0;
-	List *existingShardList = NIL;
-
-	/* make sure table is hash partitioned */
-	CheckHashPartitionedTable(distributedTableId);
-
-	/* we plan to add shards: get an exclusive metadata lock */
-	LockRelationDistributionMetadata(distributedTableId, ExclusiveLock);
-
-	/* validate that shards haven't already been created for this table */
-	existingShardList = LoadShardIntervalList(distributedTableId);
-	if (existingShardList != NIL)
-	{
-		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg("table \"%s\" has already had shards created for it",
-							   tableName)));
-	}
-
-	/* make sure that at least one shard is specified */
-	if (shardCount <= 0)
-	{
-		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("shard_count must be positive")));
-	}
-
-	/* make sure that at least one replica is specified */
-	if (replicationFactor <= 0)
-	{
-		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("replication_factor must be positive")));
-	}
-
-	/* calculate the split of the hash space */
-	hashTokenIncrement = UINT_MAX / shardCount;
-
-	/* load and sort the worker node list for deterministic placement */
-	workerNodeList = ParseWorkerNodeFile(WORKER_LIST_FILENAME);
-	workerNodeList = SortList(workerNodeList, CompareWorkerNodes);
-
-	/* make sure we don't process cancel signals until all shards are created */
-	HOLD_INTERRUPTS();
-
-	/* retrieve the DDL commands for the table */
-	ddlCommandList = TableDDLCommandList(distributedTableId);
-
-	workerNodeCount = list_length(workerNodeList);
-	if (replicationFactor > workerNodeCount)
-	{
-		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("replication_factor (%d) exceeds number of worker nodes "
-							   "(%d)", replicationFactor, workerNodeCount),
-						errhint("Add more worker nodes or try again with a lower "
-								"replication factor.")));
-	}
-
-	/* if we have enough nodes, add an extra placement attempt for backup */
-	placementAttemptCount = (uint32) replicationFactor;
-	if (workerNodeCount > replicationFactor)
-	{
-		placementAttemptCount++;
-	}
-
-	/* set shard storage type according to relation type */
-	if (relationKind == RELKIND_FOREIGN_TABLE)
-	{
-		shardStorageType = SHARD_STORAGE_FOREIGN;
-	}
-	else
-	{
-		shardStorageType = SHARD_STORAGE_TABLE;
-	}
-
-	for (shardIndex = 0; shardIndex < shardCount; shardIndex++)
-	{
-		List *extendedDDLCommands = NIL;
-		int64 shardId = -1;
-		int32 placementCount = 0;
-		uint32 placementIndex = 0;
-		uint32 roundRobinNodeIndex = shardIndex % workerNodeCount;
-
-		/* initialize the hash token space for this shard */
-		text *minHashTokenText = NULL;
-		text *maxHashTokenText = NULL;
-		int32 shardMinHashToken = INT_MIN + (shardIndex * hashTokenIncrement);
-		int32 shardMaxHashToken = shardMinHashToken + hashTokenIncrement - 1;
-
-		/* if we are at the last shard, make sure the max token value is INT_MAX */
-		if (shardIndex == (shardCount - 1))
-		{
-			shardMaxHashToken = INT_MAX;
-		}
-
-		/* insert the shard metadata row along with its min/max values */
-		minHashTokenText = IntegerToText(shardMinHashToken);
-		maxHashTokenText = IntegerToText(shardMaxHashToken);
-		shardId = CreateShardRow(distributedTableId, shardStorageType, minHashTokenText,
-								 maxHashTokenText);
-
-		extendedDDLCommands = ExtendedDDLCommandList(distributedTableId, shardId,
-													 ddlCommandList);
-
-		/*
-		 * Grabbing the shard metadata lock isn't technically necessary since
-		 * we already hold an exclusive lock on the partition table, but we'll
-		 * acquire it for the sake of completeness. As we're adding new active
-		 * placements, the mode must be exclusive.
-		 */
-		LockShardDistributionMetadata(shardId, ExclusiveLock);
-
-		for (placementIndex = 0; placementIndex < placementAttemptCount; placementIndex++)
-		{
-			int32 candidateNodeIndex =
-				(roundRobinNodeIndex + placementIndex) % workerNodeCount;
-			WorkerNode *candidateNode = (WorkerNode *) list_nth(workerNodeList,
-																candidateNodeIndex);
-			char *nodeName = candidateNode->nodeName;
-			uint32 nodePort = candidateNode->nodePort;
-
-			bool created = ExecuteRemoteCommandList(nodeName, nodePort,
-													extendedDDLCommands);
-			if (created)
-			{
-				CreateShardPlacementRow(shardId, STATE_FINALIZED, nodeName, nodePort);
-				placementCount++;
-			}
-			else
-			{
-				ereport(WARNING, (errmsg("could not create shard on \"%s:%u\"",
-										 nodeName, nodePort)));
-			}
-
-			if (placementCount >= replicationFactor)
-			{
-				break;
-			}
-		}
-
-		/* check if we created enough shard replicas */
-		if (placementCount < replicationFactor)
-		{
-			ereport(ERROR, (errmsg("could not satisfy specified replication factor"),
-							errdetail("Created %d shard replicas, less than the "
-									  "requested replication factor of %d.",
-									  placementCount, replicationFactor)));
-		}
-	}
-
-	if (QueryCancelPending)
-	{
-		ereport(WARNING, (errmsg("cancel requests are ignored during shard creation")));
-		QueryCancelPending = false;
-	}
-
-	RESUME_INTERRUPTS();
 
 	PG_RETURN_VOID();
 }
@@ -604,20 +710,6 @@ ExecuteRemoteCommand(PGconn *connection, const char *sqlCommand)
 
 	PQclear(result);
 	return commandSuccessful;
-}
-
-
-/* Helper function to convert an integer value to a text type */
-static text *
-IntegerToText(int32 value)
-{
-	text *valueText = NULL;
-	StringInfo valueString = makeStringInfo();
-	appendStringInfo(valueString, "%d", value);
-
-	valueText = cstring_to_text(valueString->data);
-
-	return valueText;
 }
 
 

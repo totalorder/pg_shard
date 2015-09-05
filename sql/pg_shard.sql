@@ -137,10 +137,15 @@ BEGIN
 			-- shard keeps track of hash value ranges for each shard
 			CREATE TABLE shard (
 				id bigint primary key default nextval('shard_id_sequence'),
-				relation_id oid not null,
-				storage "char" not null,
-				min_value text not null,
-				max_value text not null
+				cluster_id oid not null,
+				min_value integer not null,
+				max_value integer not null
+			)
+
+			CREATE TABLE cluster (
+				id int primary key default nextval('cluster_id_sequence'),
+				name text not null,
+				key_type regtype not null
 			)
 
 			-- shard_placement records which nodes contain which shards
@@ -160,16 +165,18 @@ BEGIN
 			)
 
 			-- make a few more indexes for fast access
-			CREATE INDEX shard_relation_index ON shard (relation_id)
 			CREATE INDEX shard_placement_node_name_node_port_index
 				ON shard_placement (node_name, node_port)
 			CREATE INDEX shard_placement_shard_index ON shard_placement (shard_id)
 
 			-- make sequences for shards and placements
-			CREATE SEQUENCE shard_id_sequence MINVALUE 10000 NO CYCLE
+			CREATE SEQUENCE shard_id_sequence NO CYCLE
+			CREATE SEQUENCE cluster_id_sequence NO CYCLE
 			CREATE SEQUENCE shard_placement_id_sequence NO CYCLE;
 
 			-- associate sequences with their columns
+			ALTER SEQUENCE pgs_distribution_metadata.cluster_id_sequence
+				OWNED BY pgs_distribution_metadata.cluster.id;
 			ALTER SEQUENCE pgs_distribution_metadata.shard_id_sequence
 				OWNED BY pgs_distribution_metadata.shard.id;
 			ALTER SEQUENCE pgs_distribution_metadata.shard_placement_id_sequence
@@ -187,20 +194,24 @@ END;
 $$;
 
 -- define the table distribution functions
-CREATE FUNCTION shard(table_name text, partition_key anyelement)
-RETURNS void
-AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT;
-
--- define the table distribution functions
 CREATE FUNCTION master_create_distributed_table(table_name text, partition_column text,
 												partition_method "char" DEFAULT 'h')
 RETURNS void
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT;
 
-CREATE FUNCTION master_create_worker_shards(table_name text, shard_count integer,
-											replication_factor integer DEFAULT 2)
+-- define the table distribution functions
+CREATE FUNCTION master_create_cluster(cluster_name text, key_type regtype, shard_count integer, replication_factor integer)
+RETURNS void
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION shard(cluster_name text, key anyelement)
+RETURNS void
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION shardall(cluster_name text)
 RETURNS void
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT;

@@ -97,8 +97,8 @@ static PlannedStmt * PgShardPlanner(Query *parse, int cursorOptions,
 static PlannerType DeterminePlannerType(Query *query);
 static void ErrorIfQueryNotSupported(Query *queryTree);
 static Oid ExtractFirstDistributedTableId(Query *query);
+static bool ContainsSystemTable(Query *query);
 static bool ExtractRangeTableEntryWalker(Node *node, List **rangeTableList);
-static List * DistributedQueryShardList(Query *query);
 static bool SelectFromMultipleShards(Query *query, List *queryShardList);
 static void ClassifyRestrictions(List *queryRestrictList, List **remoteRestrictList,
 								 List **localRestrictList);
@@ -112,7 +112,7 @@ static Const * ExtractPartitionValue(Query *query, Var *partitionColumn);
 static bool ExtractFromExpressionWalker(Node *node, List **qualifierList);
 static List * QueryFromList(List *rangeTableList);
 static List * TargetEntryList(List *expressionList);
-static CreateStmt * CreateTemporaryTableLikeStmt(Oid sourceRelationId);
+static CreateStmt *CreateTemporaryFromTupleDesc(TupleDesc tupleDesc);
 static DistributedPlan * BuildDistributedPlan(Query *query, List *shardIntervalList);
 
 /* executor functions forward declarations */
@@ -146,7 +146,6 @@ static void SetupPLErrorTransformation(PLpgSQL_execstate *estate, PLpgSQL_functi
 static void TeardownPLErrorTransformation(PLpgSQL_execstate *estate,
 										  PLpgSQL_function *func);
 static void PgShardErrorTransform(void *arg);
-static void ErrorShardMismatch(void);
 
 void ExecuteDistributedStatementOnShards(List *shardList, char *statement);
 static PLpgSQL_plugin PluginFuncs = {
@@ -235,14 +234,12 @@ void SetShardInfo(List *shardList) {
 void pg_shard_xact_cb(XactEvent event, void *arg)
 {
 	if (shardInfo.shardList != NULL) {
-		ereport(LOG, (errmsg("Ending sharded transaction with event %d", event)));
 		if (event == XACT_EVENT_COMMIT) {
 			ExecuteDistributedStatementOnShards(shardInfo.shardList, "COMMIT;");
-			pfree(shardInfo.shardList);
 			shardInfo.shardList = NULL;
 		} else if (event == XACT_EVENT_ABORT) {
+			ereport(LOG, (errmsg("Ending sharded transaction with ABORT")));
 			ExecuteDistributedStatementOnShards(shardInfo.shardList, "ROLLBACK;");
-			pfree(shardInfo.shardList);
 			shardInfo.shardList = NULL;
 		}
 
@@ -307,12 +304,8 @@ OpExpr *GetFilterFromShardingInfo(text *tableNameText, Datum datum, Oid *tableId
 void ExecuteDistributedStatementOnShards(List *shardList, char *statement) {
 	ListCell *shardIntervalCell = NULL;
 	List *taskList = NIL;
-	Task *firstTask;
-	ListCell *taskPlacementCell = NULL;
-	List *failedPlacementList = NIL;
-	ListCell *failedPlacementCell = NULL;
 
-	ereport(LOG, (errmsg("Found %d shards", list_length(shardList))));
+	ListCell *taskCell = NULL;
 
 	foreach(shardIntervalCell, shardList)
 	{
@@ -323,8 +316,9 @@ void ExecuteDistributedStatementOnShards(List *shardList, char *statement) {
 		StringInfo beginQueryString = makeStringInfo();
 		appendStringInfoString(beginQueryString, statement);
 
+		// TODO: Figure out when this is required and when it's not
 		/* grab shared metadata lock to stop concurrent placement additions */
-		LockShardDistributionMetadata(shardId, ShareLock);
+//		LockShardDistributionMetadata(shardId, ShareLock);
 
 		/* now safe to populate placement list */
 		finalizedPlacementList = LoadFinalizedShardPlacementList(shardId);
@@ -333,83 +327,59 @@ void ExecuteDistributedStatementOnShards(List *shardList, char *statement) {
 		task->queryString = beginQueryString;
 		task->taskPlacementList = finalizedPlacementList;
 		task->shardId = shardId;
-		ereport(LOG, (errmsg("Placements for shard %ld : %d", shardId, list_length(finalizedPlacementList))));
 
 		taskList = lappend(taskList, task);
 	}
 
-	if (list_length(taskList) != 1)
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				errmsg("cannot modify multiple shards during a single query")));
-	}
+	foreach(taskCell, taskList) {
+		ListCell *taskPlacementCell = NULL;
+		Task *task = (Task *) lfirst(taskCell);
+		List *failedPlacementList = NIL;
+		ListCell *failedPlacementCell = NULL;
 
-	firstTask = (Task *) linitial(taskList);
+		foreach(taskPlacementCell, task->taskPlacementList) {
+			ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
+			char *nodeName = taskPlacement->nodeName;
+			int32 nodePort = taskPlacement->nodePort;
 
-	foreach(taskPlacementCell, firstTask->taskPlacementList)
-	{
-		ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
-		char *nodeName = taskPlacement->nodeName;
-		int32 nodePort = taskPlacement->nodePort;
 
-		PGconn *connection = NULL;
-		PGresult *result = NULL;
-//		char *currentAffectedTupleString = NULL;
-//		int32 currentAffectedTupleCount = -1;
+			PGconn *connection = NULL;
+			PGresult *result = NULL;
 
-		Assert(taskPlacement->shardState == STATE_FINALIZED);
+			Assert(taskPlacement->shardState == STATE_FINALIZED);
 
-		connection = GetConnection(nodeName, nodePort);
-		if (connection == NULL)
-		{
-			failedPlacementList = lappend(failedPlacementList, taskPlacement);
-			ereport(LOG, (errmsg("Failed to get connection for %s:%d", nodeName, nodePort)));
-			continue;
-		}
+			connection = GetConnection(nodeName, nodePort);
+			if (connection == NULL) {
+				failedPlacementList = lappend(failedPlacementList, taskPlacement);
+				ereport(LOG, (errmsg("Failed to get connection for %s:%d", nodeName, nodePort)));
+				continue;
+			}
 
-		ereport(LOG, (errmsg("Executing %s on %s:%d", firstTask->queryString->data, nodeName, nodePort)));
-		result = PQexec(connection, firstTask->queryString->data);
-		if (PQresultStatus(result) != PGRES_COMMAND_OK)
-		{
-			ReportRemoteError(connection, result);
+			result = PQexec(connection, task->queryString->data);
+			if (PQresultStatus(result) != PGRES_COMMAND_OK) {
+				ReportRemoteError(connection, result);
+				PQclear(result);
+
+				failedPlacementList = lappend(failedPlacementList, taskPlacement);
+				ereport(LOG, (errmsg("Failed execute on %s:%d", nodeName, nodePort)));
+				continue;
+			}
+
+
 			PQclear(result);
-
-			failedPlacementList = lappend(failedPlacementList, taskPlacement);
-			ereport(LOG, (errmsg("Failed execute on %s:%d", nodeName, nodePort)));
-			continue;
 		}
+		/* if all placements failed, error out */
+		if (list_length(failedPlacementList) == list_length(task->taskPlacementList))
+		{
+			ereport(ERROR, (errmsg("could not modify any active placements")));
+		}
+		/* otherwise, mark failed placements as inactive: they're stale */
+		foreach(failedPlacementCell, failedPlacementList)
+		{
+			ShardPlacement *failedPlacement = (ShardPlacement *) lfirst(failedPlacementCell);
 
-//		currentAffectedTupleString = PQcmdTuples(result);
-//		currentAffectedTupleCount = pg_atoi(currentAffectedTupleString, sizeof(int32), 0);
-//
-//		if ((affectedTupleCount == -1) ||
-//			(affectedTupleCount == currentAffectedTupleCount))
-//		{
-//			affectedTupleCount = currentAffectedTupleCount;
-//		}
-//		else
-//		{
-//			ereport(WARNING, (errmsg("modified %d tuples, but expected to modify %d",
-//									 currentAffectedTupleCount, affectedTupleCount),
-//					errdetail("modified placement on %s:%d",
-//							  nodeName, nodePort)));
-//		}
-
-		PQclear(result);
-	}
-
-	/* if all placements failed, error out */
-	if (list_length(failedPlacementList) == list_length(firstTask->taskPlacementList))
-	{
-		ereport(ERROR, (errmsg("could not modify any active placements")));
-	}
-
-	/* otherwise, mark failed placements as inactive: they're stale */
-	foreach(failedPlacementCell, failedPlacementList)
-	{
-		ShardPlacement *failedPlacement = (ShardPlacement *) lfirst(failedPlacementCell);
-
-		UpdateShardPlacementRowState(failedPlacement->id, STATE_INACTIVE);
+			UpdateShardPlacementRowState(failedPlacement->id, STATE_INACTIVE);
+		}
 	}
 }
 
@@ -536,11 +506,12 @@ PgShardPlanner(Query *query, int cursorOptions, ParamListInfo boundParams)
 
 		ErrorIfQueryNotSupported(distributedQuery);
 
-		/*
-		 * Compute the list of shards this query needs to access.
-		 * Error out if there are no existing shards for the table.
-		 */
-		queryShardList = DistributedQueryShardList(distributedQuery);
+		if (shardInfo.shardList == NULL) {
+			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot perform distributed planning outside of shard() transaction"),
+					errdetail("shard() has to be the first command in a distributed transaction ")));
+		}
+		queryShardList = shardInfo.shardList;
 
 		/*
 		 * If a select query touches multiple shards, we don't push down the
@@ -555,7 +526,6 @@ PgShardPlanner(Query *query, int cursorOptions, ParamListInfo boundParams)
 		selectFromMultipleShards = SelectFromMultipleShards(query, queryShardList);
 		if (selectFromMultipleShards)
 		{
-			Oid distributedTableId = InvalidOid;
 			Query *localQuery = NULL;
 			List *queryRestrictList = QueryRestrictList(distributedQuery);
 			List *remoteRestrictList = NIL;
@@ -579,8 +549,6 @@ PgShardPlanner(Query *query, int cursorOptions, ParamListInfo boundParams)
 			plannedStatement = PlanSequentialScan(localQuery, cursorOptions, boundParams);
 
 			/* construct a CreateStmt to clone the existing table */
-			distributedTableId = ExtractFirstDistributedTableId(distributedQuery);
-			createTemporaryTableStmt = CreateTemporaryTableLikeStmt(distributedTableId);
 		}
 
 		distributedPlan = BuildDistributedPlan(distributedQuery, queryShardList);
@@ -650,8 +618,7 @@ DeterminePlannerType(Query *query)
 	else if (commandType == CMD_SELECT || commandType == CMD_INSERT ||
 			 commandType == CMD_UPDATE || commandType == CMD_DELETE)
 	{
-		Oid distributedTableId = ExtractFirstDistributedTableId(query);
-		if (OidIsValid(distributedTableId))
+		if ((shardInfo.shardList != NULL && !ContainsSystemTable(query)))
 		{
 			plannerType = PLANNER_TYPE_PG_SHARD;
 		}
@@ -681,8 +648,6 @@ DeterminePlannerType(Query *query)
 static void
 ErrorIfQueryNotSupported(Query *queryTree)
 {
-	Oid distributedTableId = ExtractFirstDistributedTableId(queryTree);
-	Var *partitionColumn = PartitionColumn(distributedTableId);
 	List *rangeTableList = NIL;
 	ListCell *rangeTableCell = NULL;
 	bool hasValuesScan = false;
@@ -828,11 +793,6 @@ ErrorIfQueryNotSupported(Query *queryTree)
 			{
 				hasNonConstTargetEntryExprs = true;
 			}
-
-			if (targetEntry->resno == partitionColumn->varattno)
-			{
-				specifiesPartitionValue = true;
-			}
 		}
 
 		joinTree = queryTree->jointree;
@@ -886,6 +846,28 @@ ExtractFirstDistributedTableId(Query *query)
 	return distributedTableId;
 }
 
+static bool
+ContainsSystemTable(Query *query)
+{
+	List *rangeTableList = NIL;
+	ListCell *rangeTableCell = NULL;
+
+	/* extract range table entries */
+	ExtractRangeTableEntryWalker((Node *) query, &rangeTableList);
+
+	foreach(rangeTableCell, rangeTableList)
+	{
+		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
+
+		if (IsInSystemNamespace(rangeTableEntry->relid))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 
 /*
  * ExtractRangeTableEntryWalker walks over a query tree, and finds all range
@@ -921,75 +903,6 @@ ExtractRangeTableEntryWalker(Node *node, List **rangeTableList)
 	return walkIsComplete;
 }
 
-
-/*
- * DistributedQueryShardList prunes the shards for the table in the query based
- * on the query's restriction qualifiers, and returns this list. It is possible
- * that all shards will be pruned if a query's restrictions are unsatisfiable.
- * In that case, this function can return an empty list; however, if the table
- * being queried has no shards created whatsoever, this function errors out.
- */
-static List *
-DistributedQueryShardList(Query *query)
-{
-	List *restrictClauseList = NIL;
-	List *prunedShardList = NIL;
-
-	Oid distributedTableId = ExtractFirstDistributedTableId(query);
-	List *shardIntervalList = NIL;
-
-	ListCell *prunedShardIntervalCell = NULL;
-	ListCell *lockedShardIntervalCell = NULL;
-
-	/* error out if no shards exist for the table */
-	shardIntervalList = LookupShardIntervalList(distributedTableId);
-	if (shardIntervalList == NIL)
-	{
-		char *relationName = get_rel_name(distributedTableId);
-
-		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg("could not find any shards for query"),
-						errdetail("No shards exist for distributed table \"%s\".",
-								  relationName),
-						errhint("Run master_create_worker_shards to create shards "
-								"and try again.")));
-	}
-
-	restrictClauseList = QueryRestrictList(query);
-	prunedShardList = PruneShardList(distributedTableId, restrictClauseList,
-									 shardIntervalList);
-
-	if (shardInfo.shardList != NULL) {
-		// Error out if the shards required for this query does not match the shards
-		// the transaction is locked to
-		if (shardInfo.shardList->length != prunedShardList->length) {
-			ErrorShardMismatch();
-		} else {
-			prunedShardIntervalCell = list_head(prunedShardList);
-			foreach(lockedShardIntervalCell, shardInfo.shardList) {
-				ShardInterval *lockedShardInterval = (ShardInterval *)lfirst(lockedShardIntervalCell);
-				ShardInterval *prunedShardInterval = (ShardInterval *)lfirst(prunedShardIntervalCell);
-
-				if (lockedShardInterval->id != prunedShardInterval->id) {
-					ErrorShardMismatch();
-					break;
-				}
-
-				prunedShardIntervalCell = lnext(prunedShardIntervalCell);
-			}
-		}
-
-		return shardInfo.shardList;
-	}
-
-	return prunedShardList;
-}
-
-static void ErrorShardMismatch() {
-	ereport(ERROR, (errmsg("Statement touches shards outside the transaction!"),
-			errdetail("The statement touches shards that are not allowed in the scope of the transaction"),
-			errhint("Make sure all statements in the transaction touches exactly the same shards")));
-}
 
 /* Returns true if the query is a select query that reads data from multiple shards. */
 static bool
@@ -1332,28 +1245,15 @@ TargetEntryList(List *expressionList)
 }
 
 
-/*
- * CreateTemporaryTableLikeStmt returns a CreateStmt node which will create a
- * clone of the given relation using the CREATE TEMPORARY TABLE LIKE option.
- * Note that the function only creates the table, and doesn't copy over indexes,
- * constraints, or default values.
- */
 static CreateStmt *
-CreateTemporaryTableLikeStmt(Oid sourceRelationId)
+CreateTemporaryFromTupleDesc(TupleDesc tupleDesc)
 {
 	static unsigned long temporaryTableId = 0;
 	CreateStmt *createStmt = NULL;
 	StringInfo clonedTableName = NULL;
 	RangeVar *clonedRelation = NULL;
+	List *columnDefs = NIL;
 
-	char *sourceTableName = get_rel_name(sourceRelationId);
-	Oid sourceSchemaId = get_rel_namespace(sourceRelationId);
-	char *sourceSchemaName = get_namespace_name(sourceSchemaId);
-	RangeVar *sourceRelation = makeRangeVar(sourceSchemaName, sourceTableName, -1);
-
-	TableLikeClause *tableLikeClause = makeNode(TableLikeClause);
-	tableLikeClause->relation = sourceRelation;
-	tableLikeClause->options = 0; /* don't copy over indexes/constraints etc */
 
 	/* create a unique name for the cloned table */
 	clonedTableName = makeStringInfo();
@@ -1365,8 +1265,40 @@ CreateTemporaryTableLikeStmt(Oid sourceRelationId)
 	clonedRelation->relpersistence = RELPERSISTENCE_TEMP;
 
 	createStmt = makeNode(CreateStmt);
+	createStmt->tableElts = NIL;
+	createStmt->inhRelations = NIL;
+	createStmt->ofTypename = NULL;
+
+	for (int attidx = 0; attidx < tupleDesc->natts; attidx++) {
+		Form_pg_attribute attr = tupleDesc->attrs[attidx];
+		TypeName *coltype = makeNode(TypeName);
+		ColumnDef *columnDef = makeNode(ColumnDef);
+
+		coltype->names = NIL;
+		coltype->typeOid = attr->atttypid;
+		coltype->setof = false;
+		coltype->pct_type = false;
+		coltype->typmods = NIL;
+		coltype->typemod = attr->atttypmod;
+		coltype->arrayBounds = NIL;
+		coltype->location = -1;
+
+		columnDef->typeName = coltype;
+		columnDef->collOid = attr->atttypid;
+		columnDef->colname = NameStr(attr->attname);
+		columnDef->collOid = attr->attcollation;
+		columnDef->collClause = NULL;
+		columnDef->is_local = true;
+		columnDef->is_from_type = false;
+		columnDef->constraints = NIL;
+		columnDef->fdwoptions = NIL;
+		columnDef->location = -1;
+
+		columnDefs = lappend(columnDefs, columnDef);
+	}
+
 	createStmt->relation = clonedRelation;
-	createStmt->tableElts = list_make1(tableLikeClause);
+	createStmt->tableElts = columnDefs;
 	createStmt->oncommit = ONCOMMIT_DROP;
 
 	return createStmt;
@@ -1507,14 +1439,23 @@ PgShardExecutorStart(QueryDesc *queryDesc, int eflags)
 			 * original one.
 			 */
 			Plan *originalPlan = NULL;
+			CreateStmt *createStmt;
+			const char *queryDescription = "create temp table";
 			RangeTblEntry *sequentialScanRangeTable = NULL;
+			RangeTblEntry *rte = NULL;
 			Oid intermediateResultTableId = InvalidOid;
 			bool missingOK = false;
+			RangeVar *intermediateResultTable;
+
+			TupleDesc tupleStoreDescriptor = ExecTypeFromTL(distributedPlan->targetList, false);
+
+			rte = linitial(plannedStatement->rtable);
+			ExecTypeSetColNames(tupleStoreDescriptor, rte->eref->colnames);
+			createStmt = CreateTemporaryFromTupleDesc(tupleStoreDescriptor);
+
 
 			/* execute the previously created statement to create a temp table */
-			CreateStmt *createStmt = distributedPlan->createTemporaryTableStmt;
-			const char *queryDescription = "create temp table like";
-			RangeVar *intermediateResultTable = createStmt->relation;
+			intermediateResultTable = createStmt->relation;
 
 			ProcessUtility((Node *) createStmt, queryDescription,
 						   PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
@@ -2399,38 +2340,6 @@ PgShardProcessUtility(Node *parsetree, const char *queryString,
 	{
 		DropStmt *dropStatement = (DropStmt *) parsetree;
 		ErrorOnDropIfDistributedTablesExist(dropStatement);
-//	} else if (statementType == T_VariableSetStmt) {
-//		VariableSetStmt *setStmt = (VariableSetStmt *)parsetree;
-//
-//		ereport(LOG, (errmsg("VariableSetStmt: %s", setStmt->name)));
-//
-//		if (strcmp(setStmt->name, "pg_shard.key") == 0) {
-//			if (!setStmt->is_local) {
-//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-//						errmsg("pg_shard.key must be set with SET LOCAL")));
-//			} else if (GetConfigOption("pg_shard.table", true, false) == NULL) {
-//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-//						errmsg("pg_shard.table must be set before pg_shard.key!")));
-//			} else if (!IsInTransactionChain(true)) {
-//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-//						errmsg("pg_shard.key must only be set in a transaction!")));
-//			} else if (GetConfigOption("pg_shard.key", true, false) != NULL) {
-//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-//						errmsg("pg_shard.key is already set in transaction!")));
-//			} else {
-//
-//			}
-//		} else if (strcmp(setStmt->name, "pg_shard.value") == 0) {
-//			if (!setStmt->is_local) {
-//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-//						errmsg("pg_shard.table must be set with SET LOCAL")));
-//			} else if (!IsInTransactionChain(true)) {
-//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-//					errmsg("pg_shard.table must only be set in a transaction!")));
-//			} else if (GetConfigOption("pg_shard.table", true, false) != NULL) {
-//				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-//						errmsg("pg_shard.table is already set in transaction!")));
-//			}
 	}
 
 	if (PreviousProcessUtilityHook != NULL)

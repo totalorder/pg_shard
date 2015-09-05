@@ -46,6 +46,7 @@ extern Oid ResolveRelationId(text *relationName);
 extern Datum master_create_distributed_table(PG_FUNCTION_ARGS);
 extern Datum master_create_worker_shards(PG_FUNCTION_ARGS);
 extern Datum shard(PG_FUNCTION_ARGS);
-
+extern Datum shardall(PG_FUNCTION_ARGS);
+extern Datum master_create_cluster(PG_FUNCTION_ARGS);
 
 #endif /* PG_SHARD_CREATE_SHARDS_H */
