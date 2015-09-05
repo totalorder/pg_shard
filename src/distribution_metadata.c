@@ -624,6 +624,8 @@ TupleToShardPlacement(HeapTuple heapTuple, TupleDesc tupleDescriptor)
 										TLIST_NUM_SHARD_PLACEMENT_NODE_NAME, &isNull);
 	Datum nodePortDatum = SPI_getbinval(heapTuple, tupleDescriptor,
 										TLIST_NUM_SHARD_PLACEMENT_NODE_PORT, &isNull);
+	Datum dbNameDatum = SPI_getbinval(heapTuple, tupleDescriptor,
+										TLIST_NUM_SHARD_PLACEMENT_DB_NAME, &isNull);
 
 	shardPlacement = palloc0(sizeof(ShardPlacement));
 	shardPlacement->id = DatumGetInt64(idDatum);
@@ -631,6 +633,7 @@ TupleToShardPlacement(HeapTuple heapTuple, TupleDesc tupleDescriptor)
 	shardPlacement->shardState = DatumGetInt32(shardStateDatum);
 	shardPlacement->nodeName = TextDatumGetCString(nodeNameDatum);
 	shardPlacement->nodePort = DatumGetInt32(nodePortDatum);
+	shardPlacement->dbName = TextDatumGetCString(dbNameDatum);
 
 	return shardPlacement;
 }
@@ -706,15 +709,16 @@ int64 CreateShardRow(int32 clusterId, int32 shardMinValue, int32 shardMaxValue) 
  */
 int64
 CreateShardPlacementRow(int64 shardId, ShardState shardState, char *nodeName,
-						uint32 nodePort)
+						uint32 nodePort, char *dbName)
 {
 	int64 newShardPlacementId = -1;
-	Oid argTypes[] = { INT8OID, INT4OID, TEXTOID, INT4OID };
+	Oid argTypes[] = { INT8OID, INT4OID, TEXTOID, INT4OID, TEXTOID };
 	Datum argValues[] = {
 		Int64GetDatum(shardId),
 		Int32GetDatum((int32) shardState),
 		CStringGetTextDatum(nodeName),
-		Int32GetDatum(nodePort)
+		Int32GetDatum(nodePort),
+		CStringGetTextDatum(dbName)
 	};
 	const int argCount = sizeof(argValues) / sizeof(argValues[0]);
 	int spiStatus PG_USED_FOR_ASSERTS_ONLY = 0;
@@ -725,8 +729,8 @@ CreateShardPlacementRow(int64 shardId, ShardState shardState, char *nodeName,
 
 	spiStatus = SPI_execute_with_args("INSERT INTO "
 									  "pgs_distribution_metadata.shard_placement "
-									  "(shard_id, shard_state, node_name, node_port) "
-									  "VALUES ($1, $2, $3, $4) RETURNING id", argCount,
+									  "(shard_id, shard_state, node_name, node_port, db_name) "
+									  "VALUES ($1, $2, $3, $4, $5) RETURNING id", argCount,
 									  argTypes, argValues, NULL, false, 1);
 	Assert(spiStatus == SPI_OK_INSERT_RETURNING);
 

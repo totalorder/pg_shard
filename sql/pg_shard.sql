@@ -154,7 +154,8 @@ BEGIN
 				shard_id bigint not null references shard(id),
 				shard_state integer not null,
 				node_name text not null,
-				node_port integer not null
+				node_port integer not null,
+				db_name text not null
 			)
 
 			-- partition lists a partition key for each distributed table

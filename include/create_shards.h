@@ -34,6 +34,7 @@ typedef struct WorkerNode
 {
 	uint32 nodePort;
 	char *nodeName;
+	char *dbName;
 } WorkerNode;
 
 

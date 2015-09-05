@@ -39,7 +39,7 @@
 #define TLIST_NUM_SHARD_PARTITION_METHOD 5
 #define TLIST_NUM_SHARD_KEY 6
 
-#define SHARD_PLACEMENT_QUERY "SELECT id, shard_id, shard_state, node_name, node_port " \
+#define SHARD_PLACEMENT_QUERY "SELECT id, shard_id, shard_state, node_name, node_port, db_name " \
 							  "FROM pgs_distribution_metadata.shard_placement " \
 							  "WHERE shard_id = $1"
 
@@ -49,6 +49,7 @@
 #define TLIST_NUM_SHARD_PLACEMENT_SHARD_STATE 3
 #define TLIST_NUM_SHARD_PLACEMENT_NODE_NAME 4
 #define TLIST_NUM_SHARD_PLACEMENT_NODE_PORT 5
+#define TLIST_NUM_SHARD_PLACEMENT_DB_NAME 6
 
 /* denotes partition type of the distributed table */
 #define APPEND_PARTITION_TYPE 'a'
@@ -100,6 +101,7 @@ typedef struct ShardPlacement
 	ShardState shardState;  /* represents last known state of this placement */
 	char *nodeName;         /* hostname of machine hosting this shard */
 	int32 nodePort;         /* port number for connecting to host */
+	char *dbName;           /* database name of db hosting this shard */
 } ShardPlacement;
 
 
@@ -143,7 +145,7 @@ extern void InsertPartitionRow(Oid distributedTableId, char partitionType,
 extern int64 CreateShardRow(int32 clusterId, int32 shardMinValue,
 								   int32 shardMaxValue);
 extern int64 CreateShardPlacementRow(int64 shardId, ShardState shardState,
-									 char *nodeName, uint32 nodePort);
+									 char *nodeName, uint32 nodePort, char *dbName);
 extern void DeleteShardPlacementRow(int64 shardPlacementId);
 extern void UpdateShardPlacementRowState(int64 shardPlacementId, ShardState newState);
 extern void LockShardData(int64 shardId, LOCKMODE lockMode);

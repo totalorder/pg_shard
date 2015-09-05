@@ -38,6 +38,7 @@ typedef struct NodeConnectionKey
 {
 	char nodeName[MAX_NODE_LENGTH + 1]; /* hostname of host to connect to */
 	int32 nodePort;                     /* port of host to connect to */
+	char dbName[MAX_NODE_LENGTH + 1];   /* database name of db to connect to */
 } NodeConnectionKey;
 
 
@@ -50,7 +51,7 @@ typedef struct NodeConnectionEntry
 
 
 /* function declarations for obtaining and using a connection */
-extern PGconn * GetConnection(char *nodeName, int32 nodePort);
+extern PGconn * GetConnection(char *nodeName, int32 nodePort, char *dbName);
 extern void PurgeConnection(PGconn *connection);
 extern void ReportRemoteError(PGconn *connection, PGresult *result);
 

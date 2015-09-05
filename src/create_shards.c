@@ -366,10 +366,10 @@ Datum master_create_cluster(PG_FUNCTION_ARGS) {
 																candidateNodeIndex);
 			char *nodeName = candidateNode->nodeName;
 			uint32 nodePort = candidateNode->nodePort;
+			char *dbName = candidateNode->dbName;
 
-			CreateShardPlacementRow(shardId, STATE_FINALIZED, nodeName, nodePort);
+			CreateShardPlacementRow(shardId, STATE_FINALIZED, nodeName, nodePort, dbName);
 			placementCount++;
-
 			if (placementCount >= replicationFactor)
 			{
 				break;
@@ -517,8 +517,8 @@ ParseWorkerNodeFile(char *workerNodeFilename)
 	}
 
 	/* build pattern to contain node name length limit */
-	snprintf(workerLinePattern, sizeof(workerLinePattern), "%%%us%%*[ \t]%%10u",
-			 MAX_NODE_LENGTH);
+	snprintf(workerLinePattern, sizeof(workerLinePattern), "%%%us%%*[ \t]%%10u%%*[ \t]%%%us",
+			 MAX_NODE_LENGTH, MAX_NODE_LENGTH);
 
 	while (fgets(workerNodeLine, sizeof(workerNodeLine), workerFileStream) != NULL)
 	{
@@ -527,7 +527,9 @@ ParseWorkerNodeFile(char *workerNodeFilename)
 		uint32 nodePort = 0;
 		int parsedValues = 0;
 		char nodeName[MAX_NODE_LENGTH + 1];
+		char dbName[MAX_NODE_LENGTH + 1];
 		memset(nodeName, '\0', sizeof(nodeName));
+		memset(dbName, '\0', sizeof(dbName));
 
 		if (strnlen(workerNodeLine, MAXPGPATH) == MAXPGPATH - 1)
 		{
@@ -551,14 +553,14 @@ ParseWorkerNodeFile(char *workerNodeFilename)
 		}
 
 		/* parse out the node name and node port */
-		parsedValues = sscanf(workerNodeLine, workerLinePattern, nodeName, &nodePort);
-		if (parsedValues != 2)
+		parsedValues = sscanf(workerNodeLine, workerLinePattern, nodeName, &nodePort, dbName);
+		if (parsedValues != 3)
 		{
 			ereport(ERROR, (errcode(ERRCODE_CONFIG_FILE_ERROR),
 							errmsg("could not parse worker node line: %s",
 								   workerNodeLine),
 							errhint("Lines in the worker node file consist of a node "
-									"name and port separated by whitespace. Lines that "
+									"name, port and database separated by whitespace. Lines that "
 									"start with a '#' character are skipped.")));
 		}
 
@@ -567,6 +569,8 @@ ParseWorkerNodeFile(char *workerNodeFilename)
 		workerNode->nodeName = palloc(sizeof(char) * MAX_NODE_LENGTH + 1);
 		strlcpy(workerNode->nodeName, nodeName, MAX_NODE_LENGTH + 1);
 		workerNode->nodePort = nodePort;
+		workerNode->dbName = palloc(sizeof(char) * MAX_NODE_LENGTH + 1);
+		strlcpy(workerNode->dbName, dbName, MAX_NODE_LENGTH + 1);
 
 		workerNodeList = lappend(workerNodeList, workerNode);
 	}
@@ -623,6 +627,7 @@ CompareWorkerNodes(const void *leftElement, const void *rightElement)
 
 	int nameCompare = 0;
 	int portCompare = 0;
+	int dbCompare = 0;
 
 	nameCompare = strncmp(leftNode->nodeName, rightNode->nodeName, MAX_NODE_LENGTH);
 	if (nameCompare != 0)
@@ -631,7 +636,14 @@ CompareWorkerNodes(const void *leftElement, const void *rightElement)
 	}
 
 	portCompare = (int) (leftNode->nodePort - rightNode->nodePort);
-	return portCompare;
+	if (portCompare != 0)
+	{
+		return portCompare;
+	}
+
+	dbCompare = strncmp(leftNode->dbName, rightNode->dbName, MAX_NODE_LENGTH);
+
+	return dbCompare;
 }
 
 
@@ -640,14 +652,14 @@ CompareWorkerNodes(const void *leftElement, const void *rightElement)
  * on the specified node.
  */
 bool
-ExecuteRemoteCommandList(char *nodeName, uint32 nodePort, List *sqlCommandList)
+ExecuteRemoteCommandList(char *nodeName, uint32 nodePort, char *dbName, List *sqlCommandList)
 {
 	bool commandListExecuted = true;
 	ListCell *sqlCommandCell = NULL;
 	bool sqlCommandIssued = false;
 	bool beginIssued = false;
 
-	PGconn *connection = GetConnection(nodeName, nodePort);
+	PGconn *connection = GetConnection(nodeName, nodePort, dbName);
 	if (connection == NULL)
 	{
 		return false;

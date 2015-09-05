@@ -39,7 +39,7 @@ static HTAB *NodeConnectionHash = NULL;
 
 /* local function forward declarations */
 static HTAB * CreateNodeConnectionHash(void);
-static PGconn * ConnectToNode(char *nodeName, char *nodePort);
+static PGconn * ConnectToNode(char *nodeName, char *nodePort, char *dbName);
 static char * ConnectionGetOptionValue(PGconn *connection, char *optionKeyword);
 
 
@@ -56,7 +56,7 @@ static char * ConnectionGetOptionValue(PGconn *connection, char *optionKeyword);
  * This function throws an error if a hostname over 255 characters is provided.
  */
 PGconn *
-GetConnection(char *nodeName, int32 nodePort)
+GetConnection(char *nodeName, int32 nodePort, char *dbName)
 {
 	PGconn *connection = NULL;
 	NodeConnectionKey nodeConnectionKey;
@@ -80,6 +80,7 @@ GetConnection(char *nodeName, int32 nodePort)
 
 	memset(&nodeConnectionKey, 0, sizeof(nodeConnectionKey));
 	strncpy(nodeConnectionKey.nodeName, nodeName, MAX_NODE_LENGTH);
+	strncpy(nodeConnectionKey.dbName, dbName, MAX_NODE_LENGTH);
 	nodeConnectionKey.nodePort = nodePort;
 
 	nodeConnectionEntry = hash_search(NodeConnectionHash, &nodeConnectionKey,
@@ -102,7 +103,7 @@ GetConnection(char *nodeName, int32 nodePort)
 		StringInfo nodePortString = makeStringInfo();
 		appendStringInfo(nodePortString, "%d", nodePort);
 
-		connection = ConnectToNode(nodeName, nodePortString->data);
+		connection = ConnectToNode(nodeName, nodePortString->data, dbName);
 		if (connection != NULL)
 		{
 			nodeConnectionEntry = hash_search(NodeConnectionHash, &nodeConnectionKey,
@@ -265,11 +266,10 @@ CreateNodeConnectionHash(void)
  * and return NULL.
  */
 static PGconn *
-ConnectToNode(char *nodeName, char *nodePort)
+ConnectToNode(char *nodeName, char *nodePort, char *dbName)
 {
 	PGconn *connection = NULL;
 	const char *clientEncoding = GetDatabaseEncodingName();
-	const char *dbname = get_database_name(MyDatabaseId);
 
 	const char *keywordArray[] = {
 		"host", "port", "fallback_application_name",
@@ -277,7 +277,7 @@ ConnectToNode(char *nodeName, char *nodePort)
 	};
 	const char *valueArray[] = {
 		nodeName, nodePort, "pg_shard", clientEncoding,
-		CLIENT_CONNECT_TIMEOUT_SECONDS, dbname, NULL
+		CLIENT_CONNECT_TIMEOUT_SECONDS, dbName, NULL
 	};
 
 	Assert(sizeof(keywordArray) == sizeof(valueArray));

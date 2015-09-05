@@ -148,6 +148,7 @@ static void TeardownPLErrorTransformation(PLpgSQL_execstate *estate,
 static void PgShardErrorTransform(void *arg);
 
 void ExecuteDistributedStatementOnShards(List *shardList, char *statement);
+void ExecuteDistributedStatementsOnShards(List *shardList, List *statements);
 static PLpgSQL_plugin PluginFuncs = {
 	.func_beg = SetupPLErrorTransformation,
 	.func_end = TeardownPLErrorTransformation
@@ -341,6 +342,7 @@ void ExecuteDistributedStatementOnShards(List *shardList, char *statement) {
 			ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
 			char *nodeName = taskPlacement->nodeName;
 			int32 nodePort = taskPlacement->nodePort;
+			char *dbName = taskPlacement->dbName;
 
 
 			PGconn *connection = NULL;
@@ -348,7 +350,7 @@ void ExecuteDistributedStatementOnShards(List *shardList, char *statement) {
 
 			Assert(taskPlacement->shardState == STATE_FINALIZED);
 
-			connection = GetConnection(nodeName, nodePort);
+			connection = GetConnection(nodeName, nodePort, dbName);
 			if (connection == NULL) {
 				failedPlacementList = lappend(failedPlacementList, taskPlacement);
 				ereport(LOG, (errmsg("Failed to get connection for %s:%d", nodeName, nodePort)));
@@ -1348,7 +1350,7 @@ BuildDistributedPlan(Query *query, List *shardIntervalList)
 			}
 		}
 
-		deparse_shard_query(query, shardId, queryString);
+		deparse_shard_query(query, (int64)-1, queryString);
 
 		if (LogDistributedStatements)
 		{
@@ -1678,10 +1680,11 @@ ExecuteTaskAndStoreResults(Task *task, TupleDesc tupleDescriptor,
 		ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
 		char *nodeName = taskPlacement->nodeName;
 		int32 nodePort = taskPlacement->nodePort;
+		char *dbName = taskPlacement->dbName;
 		bool queryOK = false;
 		bool storedOK = false;
 
-		PGconn *connection = GetConnection(nodeName, nodePort);
+		PGconn *connection = GetConnection(nodeName, nodePort, dbName);
 		if (connection == NULL)
 		{
 			continue;
@@ -2030,6 +2033,7 @@ ExecuteDistributedModify(DistributedPlan *plan)
 		ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
 		char *nodeName = taskPlacement->nodeName;
 		int32 nodePort = taskPlacement->nodePort;
+		char *dbName = taskPlacement->dbName;
 
 		PGconn *connection = NULL;
 		PGresult *result = NULL;
@@ -2038,7 +2042,7 @@ ExecuteDistributedModify(DistributedPlan *plan)
 
 		Assert(taskPlacement->shardState == STATE_FINALIZED);
 
-		connection = GetConnection(nodeName, nodePort);
+		connection = GetConnection(nodeName, nodePort, dbName);
 		if (connection == NULL)
 		{
 			failedPlacementList = lappend(failedPlacementList, taskPlacement);
@@ -2340,6 +2344,15 @@ PgShardProcessUtility(Node *parsetree, const char *queryString,
 	{
 		DropStmt *dropStatement = (DropStmt *) parsetree;
 		ErrorOnDropIfDistributedTablesExist(dropStatement);
+	}
+
+	if (shardInfo.shardList != NULL) {
+		if (statementType ==  T_CreateStmt) {
+			CreateStmt *createStmt = (CreateStmt *)parsetree;
+			if (strncmp(createStmt->relation->relname, TEMPORARY_TABLE_PREFIX, strlen(TEMPORARY_TABLE_PREFIX)) != 0) {
+				ExecuteDistributedStatementOnShards(shardInfo.shardList, (char *) queryString);
+			}
+		}
 	}
 
 	if (PreviousProcessUtilityHook != NULL)

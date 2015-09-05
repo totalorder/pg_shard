@@ -122,6 +122,7 @@ master_copy_shard_placement(PG_FUNCTION_ARGS)
 
 	recreated = ExecuteRemoteCommandList(targetPlacement->nodeName,
 										 targetPlacement->nodePort,
+										 targetPlacement->dbName,
 										 ddlCommandList);
 	if (!recreated)
 	{
@@ -325,6 +326,7 @@ CopyDataFromFinalizedPlacement(Oid distributedTableId, int64 shardId,
 
 	copySuccessful = ExecuteRemoteCommandList(placementToRepair->nodeName,
 											  placementToRepair->nodePort,
+											  placementToRepair->dbName,
 											  list_make1(copyRelationQuery->data));
 
 	return copySuccessful;
