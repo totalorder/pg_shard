@@ -48,3 +48,13 @@ BEGIN;
 SELECT shardall('ucluster');
 SELECT * FROM u;
 COMMIT;
+
+BEGIN;
+SELECT shardall('ucluster');
+SELECT COUNT(id) FROM u;
+COMMIT;
+
+BEGIN;
+SELECT shardall('ucluster');
+SELECT * FROM u;
+COMMIT;

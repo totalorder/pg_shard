@@ -123,7 +123,7 @@ static LOCKMODE CommutativityRuleToLockMode(CmdType commandType);
 static void AcquireExecutorShardLocks(List *taskList, LOCKMODE lockMode);
 static int CompareTasksByShardId(const void *leftElement, const void *rightElement);
 static void ExecuteMultipleShardSelect(DistributedPlan *distributedPlan,
-									   RangeVar *intermediateTable);
+									   RangeVar *intermediateTable, TupleDesc tupleStoreDescriptor);
 static bool SendQueryInSingleRowMode(PGconn *connection, StringInfo query);
 static bool StoreQueryResult(PGconn *connection, TupleDesc tupleDescriptor,
 							 Tuplestorestate *tupleStore);
@@ -1440,18 +1440,24 @@ PgShardExecutorStart(QueryDesc *queryDesc, int eflags)
 			 * point the existing plan to scan this temp table instead of the
 			 * original one.
 			 */
-			Plan *originalPlan = NULL;
+			Plan *originalPlan;
 			CreateStmt *createStmt;
 			const char *queryDescription = "create temp table";
-			RangeTblEntry *sequentialScanRangeTable = NULL;
+			RangeTblEntry *sequentialScanRangeTable = linitial(plannedStatement->rtable);
 			RangeTblEntry *rte = NULL;
 			Oid intermediateResultTableId = InvalidOid;
 			bool missingOK = false;
 			RangeVar *intermediateResultTable;
 
 			TupleDesc tupleStoreDescriptor = ExecTypeFromTL(distributedPlan->targetList, false);
-
+			originalPlan = distributedPlan->originalPlan;
 			rte = linitial(plannedStatement->rtable);
+
+			// TODO: Figure out under what conditions this will blow up
+			if (originalPlan->lefttree != NULL) {
+				originalPlan->lefttree->targetlist = distributedPlan->targetList;
+			}
+
 			ExecTypeSetColNames(tupleStoreDescriptor, rte->eref->colnames);
 			createStmt = CreateTemporaryFromTupleDesc(tupleStoreDescriptor);
 
@@ -1463,7 +1469,7 @@ PgShardExecutorStart(QueryDesc *queryDesc, int eflags)
 						   PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
 
 			/* execute select queries and fetch results into the temp table */
-			ExecuteMultipleShardSelect(distributedPlan, intermediateResultTable);
+			ExecuteMultipleShardSelect(distributedPlan, intermediateResultTable, tupleStoreDescriptor);
 
 			/* update the query descriptor snapshot so results are visible */
 			UnregisterSnapshot(queryDesc->snapshot);
@@ -1475,12 +1481,12 @@ PgShardExecutorStart(QueryDesc *queryDesc, int eflags)
 														 NoLock, missingOK);
 
 			Assert(list_length(plannedStatement->rtable) == 1);
-			sequentialScanRangeTable = linitial(plannedStatement->rtable);
 			Assert(sequentialScanRangeTable->rtekind == RTE_RELATION);
 			sequentialScanRangeTable->relid = intermediateResultTableId;
 
+			sequentialScanRangeTable->eref->colnames = list_make1(linitial(sequentialScanRangeTable->eref->colnames));
+
 			/* swap in modified (local) plan for compatibility with standard start hook */
-			originalPlan = distributedPlan->originalPlan;
 			plannedStatement->planTree = originalPlan;
 
 			NextExecutorStartHook(queryDesc, eflags);
@@ -1624,13 +1630,10 @@ CompareTasksByShardId(const void *leftElement, const void *rightElement)
  */
 static void
 ExecuteMultipleShardSelect(DistributedPlan *distributedPlan,
-						   RangeVar *intermediateTable)
+						   RangeVar *intermediateTable, TupleDesc tupleStoreDescriptor)
 {
 	List *taskList = distributedPlan->taskList;
 	List *targetList = distributedPlan->targetList;
-
-	/* ExecType instead of ExecCleanType so we don't ignore junk columns */
-	TupleDesc tupleStoreDescriptor = ExecTypeFromTL(targetList, false);
 
 	ListCell *taskCell = NULL;
 	foreach(taskCell, taskList)
