@@ -1,0 +1,5 @@
+#!/bin/bash
+PADDED_SHARD_ID=$(echo "$1" | awk '{$1=sprintf("%02d", $1)};1')
+docker rm -f "host-$PADDED_SHARD_ID"
+echo "Starting postgres on port 100$PADDED_SHARD_ID"
+docker run -t -i -p "100$PADDED_SHARD_ID:5432" --name "host-$PADDED_SHARD_ID" "pgshost"
