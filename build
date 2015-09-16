@@ -1,16 +1,7 @@
-#(cd host && ./run 1)
-#(cd host && ./run 2)
+PGVERSION=9.3
 
 sudo make install &&
-#sudo bash -c 'echo -e "localhost 10001\nlocalhost 10002" > /var/lib/postgresql/9.3/main/pg_worker_list.conf' &&
-#sudo bash -c 'echo -e "localhost 5432\nlocalhost 6543" > /var/lib/postgresql/9.4/main/pg_worker_list.conf' &&
-sudo bash -c 'echo -e "localhost 5432 shard0\nlocalhost 5432 shard1" > /var/lib/postgresql/9.3/main/pg_worker_list.conf' &&
-
-#socat tcp-listen:6543,reuseaddr,fork tcp:localhost:5432
-#sudo -u postgres PGDATA=/var/lib/postgresql/9.4/main valgrind --leak-check=no --gen-suppressions=all \
-#     --suppressions=$HOME/dev/pg_shard/postgresql-9.4.4/src/tools/valgrind.supp --time-stamp=yes \
-#     --trace-children=yes --undef-value-errors=no \
-#     /usr/lib/postgresql/9.4/bin/postgres --log_line_prefix="%m %p " --log_statement=all --shared_buffers=64MB --config-file=/etc/postgresql/9.4/main/postgresql.conf 2>&1 | tee ~/valgrind.log
+sudo bash -c 'echo -e "localhost 5432 shard0\nlocalhost 5432 shard1" > /var/lib/postgresql/$PGVERSION/main/pg_worker_list.conf' &&
 
 sudo /etc/init.d/postgresql restart &&
 psql -d postgres -c "DROP DATABASE shard;" ;
@@ -20,3 +11,10 @@ psql -d postgres -c "CREATE DATABASE shard0;" &&
 psql -d postgres -c "DROP DATABASE shard1;" ;
 psql -d postgres -c "CREATE DATABASE shard1;" &&
 psql -d shard -f shard_setup.sql
+
+
+# Run postgres with valgrind command:
+#sudo -u postgres PGDATA=/var/lib/postgresql/$PGVERSION/main valgrind --leak-check=no --gen-suppressions=all \
+#     --suppressions=$HOME/dev/pg_shard/postgresql-9.4.4/src/tools/valgrind.supp --time-stamp=yes \
+#     --trace-children=yes --undef-value-errors=no \
+#     /usr/lib/postgresql/$PGVERSION/bin/postgres --log_line_prefix="%m %p " --log_statement=all --shared_buffers=64MB --config-file=/etc/postgresql/$PGVERSION/main/postgresql.conf 2>&1 | tee ~/valgrind.log
