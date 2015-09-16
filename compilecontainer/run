@@ -1,6 +1,11 @@
 #!/bin/bash
-SCRIPT_DIR="$(readlink -f `dirname $0`)"
-REPO_DIR="$(readlink -f $SCRIPT_DIR/..)"
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_DIR="$(cd $SCRIPT_DIR/.. && pwd)"
 
 docker rm -f "pshardcompile"
-docker run -e HOSTUSER="$USER" -e HOSTUID="$(id -u)" -v $REPO_DIR:/code -t -i --name "pshardcompile" "pshardcompile"
+if [[ $(uname) == 'Linux' ]]; then
+    UID_PARAMS="-e HOSTUSER=$USER -e HOSTUID=$(id -u)"
+fi
+
+docker run $UID_PARAMS -v $REPO_DIR:/code -t -i --name "pshardcompile" "pshardcompile"

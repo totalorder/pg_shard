@@ -11,7 +11,6 @@ Spin up a docker container which compiles the
 code and sets up a cluster for you:
 ```bash
 # Install docker if you don't already have it
-# If you are on OS X check out compilecontainer/README for uid workaround
 
 cd compilecontainer/
 

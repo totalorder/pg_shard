@@ -1,10 +1,5 @@
 First install and start docker, and then:
 
-On OS X:
-  Replace `sudo -u $HOSTUSER make` with `make` in ./startup
-  Replace `REPO_DIR="$(readlink -f $SCRIPT_DIR/..)"` with `REPO_DIR="/the/absolute/path/to/the/repo"`
-  (optional: submit a PR that makes this unnecessary)
-
 ./build
 ./run
 
