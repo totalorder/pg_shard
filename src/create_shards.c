@@ -261,7 +261,6 @@ Datum shardall(PG_FUNCTION_ARGS)
 
 Datum create_cluster(PG_FUNCTION_ARGS) {
 	int32 shardCount = PG_GETARG_INT32(2);
-	int32 replicationFactor = PG_GETARG_INT32(3);
 	int32 shardIndex;
 	int32 workerNodeCount = 0;
 	uint32 hashTokenIncrement = 0;
@@ -302,12 +301,14 @@ Datum create_cluster(PG_FUNCTION_ARGS) {
 	for (shardIndex = 0; shardIndex < shardCount; shardIndex++)
 	{
 		int64 shardId = -1;
-		int32 placementCount = 0;
 		uint32 placementIndex = 0;
 		uint32 roundRobinNodeIndex;
-		uint32 placementAttemptCount = 0;
 		List *workerNodeList = NIL;
-
+		int32 candidateNodeIndex;
+		WorkerNode *candidateNode;
+		char *nodeName;
+		uint32 nodePort;
+		char *dbName;
 
 		int32 shardMinHashToken = INT_MIN + (shardIndex * hashTokenIncrement);
 		int32 shardMaxHashToken = shardMinHashToken + hashTokenIncrement - 1;
@@ -330,24 +331,8 @@ Datum create_cluster(PG_FUNCTION_ARGS) {
 		HOLD_INTERRUPTS();
 
 		workerNodeCount = list_length(workerNodeList);
-		if (replicationFactor > workerNodeCount)
-		{
-			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("replication_factor (%d) exceeds number of worker nodes "
-								   "(%d)", replicationFactor, workerNodeCount),
-					errhint("Add more worker nodes or try again with a lower "
-									"replication factor.")));
-		}
 
 		roundRobinNodeIndex = shardIndex % workerNodeCount;
-
-		/* if we have enough nodes, add an extra placement attempt for backup */
-		placementAttemptCount = (uint32) replicationFactor;
-		if (workerNodeCount > replicationFactor)
-		{
-			placementAttemptCount++;
-		}
-
 
 		/*
 		 * Grabbing the shard metadata lock isn't technically necessary since
@@ -358,32 +343,15 @@ Datum create_cluster(PG_FUNCTION_ARGS) {
 		LockShardDistributionMetadata(shardId, ExclusiveLock);
 
 		// Create shard placements
-		for (placementIndex = 0; placementIndex < placementAttemptCount; placementIndex++)
-		{
-			int32 candidateNodeIndex = (roundRobinNodeIndex + placementIndex) % workerNodeCount;
+		candidateNodeIndex = (roundRobinNodeIndex + placementIndex) % workerNodeCount;
 
-			WorkerNode *candidateNode = (WorkerNode *) list_nth(workerNodeList,
-																candidateNodeIndex);
-			char *nodeName = candidateNode->nodeName;
-			uint32 nodePort = candidateNode->nodePort;
-			char *dbName = candidateNode->dbName;
+		candidateNode = (WorkerNode *) list_nth(workerNodeList,
+															candidateNodeIndex);
+		nodeName = candidateNode->nodeName;
+		nodePort = candidateNode->nodePort;
+		dbName = candidateNode->dbName;
 
-			CreateShardPlacementRow(shardId, STATE_FINALIZED, nodeName, nodePort, dbName);
-			placementCount++;
-			if (placementCount >= replicationFactor)
-			{
-				break;
-			}
-		}
-
-		/* check if we created enough shard replicas */
-		if (placementCount < replicationFactor)
-		{
-			ereport(ERROR, (errmsg("could not satisfy specified replication factor"),
-					errdetail("Created %d shard replicas, less than the "
-									  "requested replication factor of %d.",
-							  placementCount, replicationFactor)));
-		}
+		CreateShardPlacementRow(shardId, STATE_FINALIZED, nodeName, nodePort, dbName);
 
 		RESUME_INTERRUPTS();
 	}

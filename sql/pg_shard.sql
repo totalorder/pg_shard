@@ -202,7 +202,7 @@ AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT;
 
 -- define the table distribution functions
-CREATE FUNCTION create_cluster(cluster_name text, key_type regtype, shard_count integer, replication_factor integer)
+CREATE FUNCTION create_cluster(cluster_name text, key_type regtype, shard_count integer)
 RETURNS void
 AS 'MODULE_PATHNAME'
 LANGUAGE C STRICT;
