@@ -149,6 +149,10 @@ static void PgShardErrorTransform(void *arg);
 
 void ExecuteDistributedStatementOnShards(List *shardList, char *statement);
 void ExecuteDistributedStatementsOnShards(List *shardList, List *statements);
+
+// TODO: Figure out why this needs to be declared extern
+extern void ExecTypeSetColNames(TupleDesc typeInfo, List *namesList);
+
 static PLpgSQL_plugin PluginFuncs = {
 	.func_beg = SetupPLErrorTransformation,
 	.func_end = TeardownPLErrorTransformation
@@ -701,7 +705,7 @@ ErrorIfQueryNotSupported(Query *queryTree)
 	foreach(rangeTableCell, rangeTableList)
 	{
 		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
-		if (rangeTableEntry->rtekind == RTE_RELATION)
+		if (rangeTableEntry->rtekind == RTE_RELATION || rangeTableEntry->rtekind == RTE_JOIN)
 		{
 			queryTableCount++;
 		}
@@ -724,11 +728,6 @@ ErrorIfQueryNotSupported(Query *queryTree)
 				rangeTableEntryErrorDetail = "Subqueries are not supported in"
 											 " distributed queries.";
 			}
-			else if (rangeTableEntry->rtekind == RTE_JOIN)
-			{
-				rangeTableEntryErrorDetail = "Joins are not supported in distributed"
-											 " queries.";
-			}
 			else if (rangeTableEntry->rtekind == RTE_FUNCTION)
 			{
 				rangeTableEntryErrorDetail = "Functions must not appear in the FROM"
@@ -744,15 +743,6 @@ ErrorIfQueryNotSupported(Query *queryTree)
 								   " query"),
 							errdetail("%s", rangeTableEntryErrorDetail)));
 		}
-	}
-
-	/* reject queries which involve joins */
-	if (queryTableCount != 1)
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("cannot perform distributed planning for the given"
-							   " query"),
-						errdetail("Joins are not supported in distributed queries.")));
 	}
 
 	/* reject queries which involve multi-row inserts */
@@ -1294,7 +1284,6 @@ CreateTemporaryFromTupleDesc(TupleDesc tupleDesc)
 		columnDef->is_from_type = false;
 		columnDef->constraints = NIL;
 		columnDef->fdwoptions = NIL;
-		columnDef->location = -1;
 
 		columnDefs = lappend(columnDefs, columnDef);
 	}
@@ -1459,6 +1448,7 @@ PgShardExecutorStart(QueryDesc *queryDesc, int eflags)
 			}
 
 			ExecTypeSetColNames(tupleStoreDescriptor, rte->eref->colnames);
+
 			createStmt = CreateTemporaryFromTupleDesc(tupleStoreDescriptor);
 
 

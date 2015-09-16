@@ -71,8 +71,10 @@ create_table_then_fail(PG_FUNCTION_ARGS)
 {
 	char *nodeName = PG_GETARG_CSTRING(0);
 	int32 nodePort = PG_GETARG_INT32(1);
+	char *dbName = PG_GETARG_CSTRING(2);
+
 	List *sqlCommandList = list_make2("CREATE TABLE throwaway()", "THIS WILL FAIL");
-	bool commandsExecuted = ExecuteRemoteCommandList(nodeName, nodePort, sqlCommandList);
+	bool commandsExecuted = ExecuteRemoteCommandList(nodeName, nodePort, dbName, sqlCommandList);
 
 	PG_RETURN_BOOL(commandsExecuted);
 }

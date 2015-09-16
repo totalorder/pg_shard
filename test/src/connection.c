@@ -46,9 +46,10 @@ initialize_remote_temp_table(PG_FUNCTION_ARGS)
 {
 	char *nodeName = PG_GETARG_CSTRING(0);
 	int32 nodePort = PG_GETARG_INT32(1);
+	char* dbName = PG_GETARG_CSTRING(2);
 	PGresult *result = NULL;
 
-	PGconn *connection = GetConnection(nodeName, nodePort);
+	PGconn *connection = GetConnection(nodeName, nodePort, dbName);
 	if (connection == NULL)
 	{
 		PG_RETURN_BOOL(false);
@@ -76,10 +77,11 @@ count_remote_temp_table_rows(PG_FUNCTION_ARGS)
 {
 	char *nodeName = PG_GETARG_CSTRING(0);
 	int32 nodePort = PG_GETARG_INT32(1);
+	char* dbName = PG_GETARG_CSTRING(2);
 	Datum count = Int32GetDatum(-1);
 	PGresult *result = NULL;
 
-	PGconn *connection = GetConnection(nodeName, nodePort);
+	PGconn *connection = GetConnection(nodeName, nodePort, dbName);
 	if (connection == NULL)
 	{
 		PG_RETURN_DATUM(count);
@@ -113,8 +115,9 @@ get_and_purge_connection(PG_FUNCTION_ARGS)
 {
 	char *nodeName = PG_GETARG_CSTRING(0);
 	int32 nodePort = PG_GETARG_INT32(1);
+	char* dbName = PG_GETARG_CSTRING(2);
 
-	PGconn *connection = GetConnection(nodeName, nodePort);
+	PGconn *connection = GetConnection(nodeName, nodePort, dbName);
 	if (connection == NULL)
 	{
 		PG_RETURN_BOOL(false);

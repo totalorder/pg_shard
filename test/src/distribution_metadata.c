@@ -271,17 +271,12 @@ insert_hash_partition_row(PG_FUNCTION_ARGS)
 Datum
 create_monolithic_shard_row(PG_FUNCTION_ARGS)
 {
-	Oid distributedTableId = PG_GETARG_OID(0);
-	StringInfo minInfo = makeStringInfo();
-	StringInfo maxInfo = makeStringInfo();
+	int32 clusterId = PG_GETARG_INT32(0);
 	int64 newShardId = -1;
 
-	appendStringInfo(minInfo, "%d", INT32_MIN);
-	appendStringInfo(maxInfo, "%d", INT32_MAX);
-
-	newShardId = CreateShardRow(distributedTableId, SHARD_STORAGE_TABLE,
-								cstring_to_text(minInfo->data),
-								cstring_to_text(maxInfo->data));
+	newShardId = CreateShardRow(clusterId,
+								INT32_MIN,
+								INT32_MAX);
 
 	PG_RETURN_INT64(newShardId);
 }
@@ -297,7 +292,7 @@ create_healthy_local_shard_placement_row(PG_FUNCTION_ARGS)
 {
 	int64 shardId = PG_GETARG_INT64(0);
 	int64 newShardPlacementId = CreateShardPlacementRow(shardId, STATE_FINALIZED,
-														"localhost", 5432);
+														"localhost", 5432, "shard");
 
 	PG_RETURN_INT64(newShardPlacementId);
 }
