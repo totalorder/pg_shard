@@ -1,7 +1,7 @@
 BEGIN; COMMIT;
 CREATE EXTENSION pg_shard;
 
-SELECT master_create_cluster('ucluster', 'INTEGER'::regtype, 2, 1);
+SELECT create_cluster('ucluster', 'INTEGER'::regtype, 2, 1);
 
 BEGIN;
 SELECT shardall('ucluster');

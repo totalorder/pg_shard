@@ -71,7 +71,7 @@ PG_FUNCTION_INFO_V1(master_create_distributed_table);
 PG_FUNCTION_INFO_V1(master_create_worker_shards);
 PG_FUNCTION_INFO_V1(shard);
 PG_FUNCTION_INFO_V1(shardall);
-PG_FUNCTION_INFO_V1(master_create_cluster);
+PG_FUNCTION_INFO_V1(create_cluster);
 
 
 Datum shard(PG_FUNCTION_ARGS)
@@ -259,7 +259,7 @@ Datum shardall(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-Datum master_create_cluster(PG_FUNCTION_ARGS) {
+Datum create_cluster(PG_FUNCTION_ARGS) {
 	int32 shardCount = PG_GETARG_INT32(2);
 	int32 replicationFactor = PG_GETARG_INT32(3);
 	int32 shardIndex;
