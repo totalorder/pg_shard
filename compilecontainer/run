@@ -1,0 +1,6 @@
+#!/bin/bash
+SCRIPT_DIR="$(readlink -f `dirname $0`)"
+REPO_DIR="$(readlink -f $SCRIPT_DIR/..)"
+
+docker rm -f "pshardcompile"
+docker run -e HOSTUSER="$USER" -e HOSTUID="$(id -u)" -v $REPO_DIR:/code -t -i --name "pshardcompile" "pshardcompile"

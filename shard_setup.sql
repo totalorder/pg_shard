@@ -6,7 +6,13 @@ SELECT master_create_cluster('ucluster', 'INTEGER'::regtype, 2, 1);
 BEGIN;
 SELECT shardall('ucluster');
 CREATE TABLE u (
-  id INTEGER,
+  id INTEGER PRIMARY KEY,
+  name TEXT
+);
+
+CREATE TABLE s (
+  id INTEGER PRIMARY KEY,
+  u_id INTEGER REFERENCES u,
   name TEXT
 );
 COMMIT;
@@ -57,4 +63,34 @@ COMMIT;
 BEGIN;
 SELECT shardall('ucluster');
 SELECT * FROM u;
+COMMIT;
+
+BEGIN;
+SELECT shard('ucluster', 0);
+INSERT INTO s VALUES (0, 0, 'u0 s0');
+COMMIT;
+
+BEGIN;
+SELECT shard('ucluster', 0);
+INSERT INTO s VALUES (1, 0, 'u0 s1');
+COMMIT;
+
+BEGIN;
+SELECT shard('ucluster', 1);
+INSERT INTO s VALUES (2, 1, 'u1 s2');
+COMMIT;
+
+BEGIN;
+SELECT shard('ucluster', 0);
+SELECT * FROM u JOIN s ON (u.id = s.u_id) WHERE u.id = 0;
+COMMIT;
+
+BEGIN;
+SELECT shard('ucluster', 1);
+SELECT * FROM u JOIN s ON (u.id = s.u_id) WHERE u.id = 1;
+COMMIT;
+
+BEGIN;
+SELECT shard('ucluster', 2);
+SELECT * FROM u JOIN s ON (u.id = s.u_id) WHERE u.id = 2;
 COMMIT;

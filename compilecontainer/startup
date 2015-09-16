@@ -1,0 +1,6 @@
+#!/bin/bash
+useradd $HOSTUSER --uid $HOSTUID
+(cd /code && sudo -u $HOSTUSER make && make install) && \
+    /etc/init.d/postgresql start && \
+    sudo -u postgres psql -d shard -c "CREATE EXTENSION pg_shard;" && \
+    sudo -u postgres psql -d shard
