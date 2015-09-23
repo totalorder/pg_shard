@@ -98,6 +98,7 @@ GetConnection(char *nodeName, int32 nodePort, char *dbName)
 		}
 	}
 
+//	needNewConnection = true;
 	if (needNewConnection)
 	{
 		StringInfo nodePortString = makeStringInfo();

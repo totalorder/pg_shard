@@ -1,7 +1,7 @@
 PGVERSION=9.3
 
 sudo make install &&
-sudo bash -c 'echo -e "localhost 5432 shard0\nlocalhost 5432 shard1" > /var/lib/postgresql/$PGVERSION/main/pg_worker_list.conf' &&
+sudo bash -c "echo -e 'localhost 5432 shard0\nlocalhost 5432 shard1' > /var/lib/postgresql/$PGVERSION/main/pg_worker_list.conf" &&
 
 sudo /etc/init.d/postgresql restart &&
 psql -d postgres -c "DROP DATABASE shard;" ;
@@ -10,9 +10,10 @@ psql -d postgres -c "DROP DATABASE shard0;" ;
 psql -d postgres -c "CREATE DATABASE shard0;" &&
 psql -d postgres -c "DROP DATABASE shard1;" ;
 psql -d postgres -c "CREATE DATABASE shard1;" &&
-psql -d shard -f shard_setup.sql
+psql -d shard -c "CREATE EXTENSION pg_shard;" #&&
+#psql -d shard -f manual_test.sql
 
-
+./demo.sh
 # Run postgres with valgrind command:
 #sudo -u postgres PGDATA=/var/lib/postgresql/$PGVERSION/main valgrind --leak-check=no --gen-suppressions=all \
 #     --suppressions=$HOME/dev/pg_shard/postgresql-9.4.4/src/tools/valgrind.supp --time-stamp=yes \
