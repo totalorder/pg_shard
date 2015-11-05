@@ -1,0 +1,12 @@
+#!/bin/bash
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_DIR="$(cd $SCRIPT_DIR/.. && pwd)"
+
+docker rm -f "plain_postgres"
+if [[ $(uname) == 'Linux' ]]; then
+    UID_PARAMS="-e HOSTUSER=$USER -e HOSTUID=$(id -u)"
+fi
+
+#docker run -P $UID_PARAMS -v $REPO_DIR:/code -t -i --name "plain_postgres" "plain_postgres"
+docker run -v ~/shards:/shards -p 5433:5432 $UID_PARAMS -v $REPO_DIR:/code -t -i --name "plain_postgres" "plain_postgres" 

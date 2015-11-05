@@ -1,0 +1,12 @@
+First install and start docker, and then:
+
+./build
+./run
+
+This will compile the code and you will be dropped
+into a psql shell on a server with shards already set up.
+The front-end lives in the database `shard`
+The backends live in the databases `shard0` and shard1`
+
+Take a look in ../manual_test.sql to see what
+commands are available.

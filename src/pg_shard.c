@@ -2285,54 +2285,6 @@ PgShardProcessUtility(Node *parsetree, const char *queryString,
 								   "are unsupported")));
 		}
 	}
-	else if (statementType == T_CopyStmt)
-	{
-		CopyStmt *copyStatement = (CopyStmt *) parsetree;
-		RangeVar *relation = copyStatement->relation;
-		Node *rawQuery = copyObject(copyStatement->query);
-
-		if (relation != NULL)
-		{
-			bool failOK = true;
-			Oid tableId = RangeVarGetRelid(relation, NoLock, failOK);
-			bool isDistributedTable = false;
-
-			Assert(rawQuery == NULL);
-
-			isDistributedTable = IsDistributedTable(tableId);
-			if (isDistributedTable)
-			{
-				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("COPY commands on distributed tables "
-									   "are unsupported")));
-			}
-		}
-		else if (rawQuery != NULL)
-		{
-			Query *parsedQuery = NULL;
-			PlannerType plannerType = PLANNER_INVALID_FIRST;
-			List *queryList = pg_analyze_and_rewrite(rawQuery, queryString,
-													 NULL, 0);
-
-			Assert(relation == NULL);
-
-			if (list_length(queryList) != 1)
-			{
-				ereport(ERROR, (errmsg("unexpected rewrite result")));
-			}
-
-			parsedQuery = (Query *) linitial(queryList);
-
-			/* determine if the query runs on a distributed table */
-			plannerType = DeterminePlannerType(parsedQuery);
-			if (plannerType == PLANNER_TYPE_PG_SHARD)
-			{
-				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("COPY commands involving distributed "
-									   "tables are unsupported")));
-			}
-		}
-	}
 	else if (statementType == T_DropStmt)
 	{
 		DropStmt *dropStatement = (DropStmt *) parsetree;
@@ -2340,11 +2292,15 @@ PgShardProcessUtility(Node *parsetree, const char *queryString,
 	}
 
 	if (shardInfo.shardList != NULL) {
-		if (statementType ==  T_CreateStmt) {
+		if (statementType == T_CreateStmt) {
 			CreateStmt *createStmt = (CreateStmt *)parsetree;
 			if (strncmp(createStmt->relation->relname, TEMPORARY_TABLE_PREFIX, strlen(TEMPORARY_TABLE_PREFIX)) != 0) {
 				ExecuteDistributedStatementOnShards(shardInfo.shardList, (char *) queryString);
 			}
+		}
+
+		if (statementType == T_CreateEnumStmt || statementType == T_IndexStmt || statementType == T_AlterTableStmt) {
+			ExecuteDistributedStatementOnShards(shardInfo.shardList, (char *) queryString);
 		}
 	}
 

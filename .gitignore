@@ -58,3 +58,7 @@
 
 # ignore latest install file
 sql/*--*.sql
+
+# IntelliJ files
+/.idea/*
+CMakeLists.txt
