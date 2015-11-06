@@ -9,109 +9,142 @@ import (
 	_ "github.com/lib/pq"
 )
 
-func query() error {
-	db, err := sql.Open("postgres", "user=postgres dbname=shard sslmode=disable host=192.168.99.100 port=5433")
-	if err != nil {
-		fmt.Println("Oops")
-		log.Fatal(err)
-	}
-	defer db.Close()
 
-	tx, err := db.Begin()
-
-	if err != nil {
-		return err
-	}
-
-	defer tx.Rollback()
-
-	rand_id := rand.Intn(23776863) + 1
-	rows, err := tx.Query("SELECT id, username FROM usr WHERE id = $1 OR username IN ('a','b','c','d','e','f','g','h','i','j')", rand_id)
-
-	if err != nil {
-		return err
-	}
-
-	defer rows.Close()
-
-	for rows.Next() {
-	 	var id int
-		var username string
-	    err = rows.Scan(&id, &username)
-
-	    if err != nil {
-			return err
-		}
-	}
+const totalQueries = 400
 
 
-	err = rows.Err()
-	tx.Commit()
-	return err
-}
+// func measureNormalTime() {
+// 	durations := make(chan time.Duration)
 
-func tx() error {
-	db, err := sql.Open("postgres", "user=postgres dbname=shard sslmode=disable host=192.168.99.100 port=5434")
-	if err != nil {
-		fmt.Println("Oops")
-		log.Fatal(err)
-	}
-	defer db.Close()
+//     for i := 0; i < totalQueries; i++ {
+//     	go func() error {
+// 			db, err := sql.Open("postgres", "user=postgres dbname=shard sslmode=disable host=192.168.99.100 port=5433")
+// 			if err != nil {
+// 				return err
+// 			}
+// 			defer db.Close()
 
-	rand_id := rand.Intn(23776863) + 1
-	tx, err := db.Begin()
+// 			start := time.Now()
 
-	if err != nil {
-		return err
-	}
+// 			if err != nil {
+// 				return err
+// 			}
 
-	defer tx.Rollback()
-	_, err = tx.Exec("SELECT shard('userid'::text, $1::int)", rand_id)
+// 			rand_id := rand.Intn(23776863) + 1
+// 			rows, err := db.Query("SELECT id, username FROM usr WHERE id = $1 OR username IN ('a','b','c','d','e','f','g','h','i','j')", rand_id)
 
-	if err != nil {
-		return err
-	}
+// 			if err != nil {
+// 				return err
+// 			}
 
-	rows, err := tx.Query(fmt.Sprintf("SELECT id, username FROM usr WHERE id = %d OR username IN ('a','b','c','d','e','f','g','h','i','j')", rand_id))
+// 			defer rows.Close()
 
-	if err != nil {
-		return err
-	}
+// 			for rows.Next() {
+// 			 	var id int
+// 				var username string
+// 			    err = rows.Scan(&id, &username)
 
-	defer rows.Close()
+// 			    if err != nil {
+// 					return err
+// 				}
+// 			}
 
-	for rows.Next() {
-	 	var id int
-		var username string
-	    err = rows.Scan(&id, &username)
+// 			err = rows.Err()
 
-	    if err != nil {
-			return err
-		}
-	}
+// 			durations <- time.Since(start)
+// 			return err
+// 		}()
+//     }
+
+// 	var totalDuration time.Duration = 0
+
+//     for i := 0; i < totalQueries; i++ {
+//         totalDuration += <-durations
+//     }
+
+//     fmt.Println("Avg query time:", totalDuration / totalQueries)
+// }
 
 
-	err = rows.Err()
-	tx.Commit()
-	return err
-}
-
-func measureTime(f func() error) {
-	const totalQueries = 100
-
-	start := time.Now()
+func measureShardedTime() {
+	durations := make(chan time.Duration)
+	errors := make(chan error)
 
     for i := 0; i < totalQueries; i++ {
-    	if err := f(); err != nil {
-    		log.Fatal(err)
-    	}
+    	db, err := sql.Open("postgres", "user=postgres dbname=shard sslmode=disable host=192.168.99.100 port=5434")
+		if err != nil {
+		    errors <- err
+		    return
+		}
+		defer db.Close()
+
+    	go func(db *sql.DB) {
+			start := time.Now()
+
+			rand_id := rand.Intn(23776863) + 1
+			tx, err := db.Begin()
+
+			if err != nil {
+			    errors <- err
+			    return
+			}
+
+			defer tx.Rollback()
+			_, err = tx.Exec("SELECT shard('userid'::text, $1::int)", rand_id)
+
+			if err != nil {
+			    errors <- err
+			    return
+			}
+
+			rows, err := tx.Query(fmt.Sprintf("SELECT id, username FROM usr WHERE id = %d OR username IN ('a','b','c','d','e','f','g','h','i','j')", rand_id))
+			if err != nil {
+			    errors <- err
+			    return
+			}
+
+			defer rows.Close()
+
+			for rows.Next() {
+			 	var id int
+				var username string
+			    err = rows.Scan(&id, &username)
+
+			    if err != nil {
+			    	errors <- err
+			    	return
+				}
+			}
+
+			err = rows.Err()
+			if err != nil {
+			    errors <- err
+			    return
+			}
+
+			tx.Commit()
+			durations <- time.Since(start)
+		}(db)
     }
 
-    elapsed := time.Since(start)
-    fmt.Println("Query avg", elapsed / totalQueries)
+	var totalDuration time.Duration = 0
+	var d time.Duration
+	var err error
+
+    for i := 0; i < totalQueries; i++ {
+    	select {
+			case d = (<-durations):
+				totalDuration += d
+			case err = (<-errors):
+				log.Fatal(err)
+		}
+    }
+
+    fmt.Println("Avg query time:", totalDuration / totalQueries)
 }
 
+
 func main() {
-	measureTime(query)
-	measureTime(tx)
+	// measureNormalTime()
+	measureShardedTime()
 }
