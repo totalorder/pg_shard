@@ -8,4 +8,4 @@ if [[ $(uname) == 'Linux' ]]; then
     UID_PARAMS="-e HOSTUSER=$USER -e HOSTUID=$(id -u)"
 fi
 
-docker run $UID_PARAMS -v $REPO_DIR:/code -t -i --name "pshardcompile" "pshardcompile"
+docker run -v ~/shards:/shards -p 5434:5432 $UID_PARAMS -v $REPO_DIR:/code -t -i --name "pshardcompile" "pshardcompile" 

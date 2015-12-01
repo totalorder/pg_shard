@@ -1,0 +1,26 @@
+#!/bin/bash
+if [ ! -z $HOSTUID ]; then
+    useradd $HOSTUSER --uid $HOSTUID
+    MAKE_USER="sudo -u $HOSTUSER"
+fi
+
+(cd /code && $MAKE_USER make && make install) && \
+    /etc/init.d/postgresql start && \
+    sudo -u postgres psql -d shard -f "startup.sql" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard0.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard1.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard2.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard3.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard4.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard5.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard6.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy usr From '/shards/shard7.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate0.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate1.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate2.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate3.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate4.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate5.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate6.csv';" && \
+    sudo -u postgres psql -d shard -c "Copy paymentstate From '/shards/paymentstate7.csv';" && \
+    sudo -u postgres psql -d shard
